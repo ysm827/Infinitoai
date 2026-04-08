@@ -31,6 +31,7 @@ const inputInbucketHost = document.getElementById('input-inbucket-host');
 const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
 const inputInbucketMailbox = document.getElementById('input-inbucket-mailbox');
 const inputRunCount = document.getElementById('input-run-count');
+const DEFAULT_AUTO_RUN_COUNT = 1;
 
 // ============================================================
 // Toast Notifications
@@ -96,6 +97,7 @@ async function restoreState() {
     if (state.inbucketMailbox) {
       inputInbucketMailbox.value = state.inbucketMailbox;
     }
+    inputRunCount.value = String(state.autoRunCount || DEFAULT_AUTO_RUN_COUNT);
 
     if (state.stepStatuses) {
       for (const [step, status] of Object.entries(state.stepStatuses)) {
@@ -373,6 +375,14 @@ btnClearLog.addEventListener('click', () => {
   logArea.innerHTML = '';
 });
 
+async function saveTopSetting(payload) {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload,
+  });
+}
+
 // Save settings on change
 inputEmail.addEventListener('change', async () => {
   const email = inputEmail.value.trim();
@@ -381,11 +391,9 @@ inputEmail.addEventListener('change', async () => {
   }
 });
 
-inputVpsUrl.addEventListener('change', async () => {
+inputVpsUrl.addEventListener('input', async () => {
   const vpsUrl = inputVpsUrl.value.trim();
-  if (vpsUrl) {
-    await chrome.runtime.sendMessage({ type: 'SAVE_SETTING', source: 'sidepanel', payload: { vpsUrl } });
-  }
+  await saveTopSetting({ vpsUrl });
 });
 
 inputPassword.addEventListener('change', async () => {
@@ -398,26 +406,20 @@ inputPassword.addEventListener('change', async () => {
 
 selectMailProvider.addEventListener('change', async () => {
   updateMailProviderUI();
-  await chrome.runtime.sendMessage({
-    type: 'SAVE_SETTING', source: 'sidepanel',
-    payload: { mailProvider: selectMailProvider.value },
-  });
+  await saveTopSetting({ mailProvider: selectMailProvider.value });
 });
 
 inputInbucketMailbox.addEventListener('change', async () => {
-  await chrome.runtime.sendMessage({
-    type: 'SAVE_SETTING',
-    source: 'sidepanel',
-    payload: { inbucketMailbox: inputInbucketMailbox.value.trim() },
-  });
+  await saveTopSetting({ inbucketMailbox: inputInbucketMailbox.value.trim() });
 });
 
 inputInbucketHost.addEventListener('change', async () => {
-  await chrome.runtime.sendMessage({
-    type: 'SAVE_SETTING',
-    source: 'sidepanel',
-    payload: { inbucketHost: inputInbucketHost.value.trim() },
-  });
+  await saveTopSetting({ inbucketHost: inputInbucketHost.value.trim() });
+});
+
+inputRunCount.addEventListener('input', async () => {
+  const count = parseInt(inputRunCount.value, 10);
+  await saveTopSetting({ autoRunCount: Number.isFinite(count) && count > 0 ? count : DEFAULT_AUTO_RUN_COUNT });
 });
 
 // ============================================================

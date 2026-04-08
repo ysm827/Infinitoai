@@ -1,6 +1,6 @@
 // background.js — Service Worker: orchestration, state, tab management, message routing
 
-importScripts('data/names.js', 'shared/flow-runner.js', 'shared/runtime-errors.js', 'shared/auto-run.js');
+importScripts('data/names.js', 'shared/flow-runner.js', 'shared/runtime-errors.js', 'shared/auto-run.js', 'shared/duck-mail-errors.js', 'shared/sidepanel-settings.js');
 
 const LOG_PREFIX = '[MultiPage:bg]';
 const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
@@ -11,6 +11,15 @@ const HUMAN_STEP_DELAY_MAX = 2200;
 const { runStepSequence } = FlowRunner;
 const { isMessageChannelClosedError } = RuntimeErrors;
 const { shouldContinueAutoRunAfterError, summarizeAutoRunResult } = AutoRun;
+const { addDuckMailRetryHint } = DuckMailErrors;
+const {
+  DEFAULT_AUTO_RUN_COUNT,
+  DEFAULT_AUTO_RUN_INFINITE,
+  PERSISTED_TOP_SETTING_KEYS,
+  normalizePersistentSettings,
+  sanitizeAutoRunCount,
+  sanitizeInfiniteAutoRun,
+} = SidepanelSettings;
 
 initializeSessionStorageAccess();
 
@@ -65,11 +74,16 @@ const DEFAULT_STATE = {
   mailProvider: '163', // 'qq' or '163'
   inbucketHost: '',
   inbucketMailbox: '',
+  autoRunCount: DEFAULT_AUTO_RUN_COUNT,
+  autoRunInfinite: DEFAULT_AUTO_RUN_INFINITE,
 };
 
 async function getState() {
-  const state = await chrome.storage.session.get(null);
-  return { ...DEFAULT_STATE, ...state };
+  const [sessionState, persistentSettings] = await Promise.all([
+    chrome.storage.session.get(null),
+    getPersistentSettings(),
+  ]);
+  return { ...DEFAULT_STATE, ...sessionState, ...persistentSettings };
 }
 
 async function initializeSessionStorageAccess() {
@@ -88,6 +102,38 @@ async function initializeSessionStorageAccess() {
 async function setState(updates) {
   console.log(LOG_PREFIX, 'storage.set:', JSON.stringify(updates).slice(0, 200));
   await chrome.storage.session.set(updates);
+}
+
+async function getPersistentSettings() {
+  const [localSettings, sessionSettings] = await Promise.all([
+    chrome.storage.local.get(PERSISTED_TOP_SETTING_KEYS),
+    chrome.storage.session.get(PERSISTED_TOP_SETTING_KEYS),
+  ]);
+
+  const mergedSettings = normalizePersistentSettings({
+    ...sessionSettings,
+    ...localSettings,
+  });
+
+  // One-time migration path from the previous session-only storage.
+  if (Object.keys(localSettings).length === 0 && Object.keys(sessionSettings).length > 0) {
+    await chrome.storage.local.set(mergedSettings);
+  }
+
+  return mergedSettings;
+}
+
+async function setPersistentSettings(updates) {
+  const currentSettings = await getPersistentSettings();
+  const nextSettings = normalizePersistentSettings({
+    ...currentSettings,
+    ...updates,
+  });
+  await Promise.all([
+    chrome.storage.local.set(nextSettings),
+    chrome.storage.session.set(nextSettings),
+  ]);
+  return nextSettings;
 }
 
 function broadcastDataUpdate(payload) {
@@ -110,29 +156,25 @@ async function setPasswordState(password) {
 async function resetState() {
   console.log(LOG_PREFIX, 'Resetting all state');
   // Preserve settings and persistent data across resets
-  const prev = await chrome.storage.session.get([
-    'seenCodes',
-    'seenInbucketMailIds',
-    'accounts',
-    'tabRegistry',
-    'vpsUrl',
-    'customPassword',
-    'mailProvider',
-    'inbucketHost',
-    'inbucketMailbox',
+  const [prev, persistentSettings] = await Promise.all([
+    chrome.storage.session.get([
+      'seenCodes',
+      'seenInbucketMailIds',
+      'accounts',
+      'tabRegistry',
+      'customPassword',
+    ]),
+    getPersistentSettings(),
   ]);
   await chrome.storage.session.clear();
   await chrome.storage.session.set({
     ...DEFAULT_STATE,
+    ...persistentSettings,
     seenCodes: prev.seenCodes || [],
     seenInbucketMailIds: prev.seenInbucketMailIds || [],
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
-    vpsUrl: prev.vpsUrl || '',
     customPassword: prev.customPassword || '',
-    mailProvider: prev.mailProvider || '163',
-    inbucketHost: prev.inbucketHost || '',
-    inbucketMailbox: prev.inbucketMailbox || '',
   });
 }
 
@@ -637,13 +679,23 @@ async function handleMessage(message, sender) {
     }
 
     case 'SAVE_SETTING': {
-      const updates = {};
-      if (message.payload.vpsUrl !== undefined) updates.vpsUrl = message.payload.vpsUrl;
-      if (message.payload.customPassword !== undefined) updates.customPassword = message.payload.customPassword;
-      if (message.payload.mailProvider !== undefined) updates.mailProvider = message.payload.mailProvider;
-      if (message.payload.inbucketHost !== undefined) updates.inbucketHost = message.payload.inbucketHost;
-      if (message.payload.inbucketMailbox !== undefined) updates.inbucketMailbox = message.payload.inbucketMailbox;
-      await setState(updates);
+      const sessionUpdates = {};
+      const persistentUpdates = {};
+
+      if (message.payload.vpsUrl !== undefined) persistentUpdates.vpsUrl = message.payload.vpsUrl;
+      if (message.payload.customPassword !== undefined) sessionUpdates.customPassword = message.payload.customPassword;
+      if (message.payload.mailProvider !== undefined) persistentUpdates.mailProvider = message.payload.mailProvider;
+      if (message.payload.inbucketHost !== undefined) persistentUpdates.inbucketHost = message.payload.inbucketHost;
+      if (message.payload.inbucketMailbox !== undefined) persistentUpdates.inbucketMailbox = message.payload.inbucketMailbox;
+      if (message.payload.autoRunCount !== undefined) persistentUpdates.autoRunCount = sanitizeAutoRunCount(message.payload.autoRunCount);
+      if (message.payload.autoRunInfinite !== undefined) persistentUpdates.autoRunInfinite = sanitizeInfiniteAutoRun(message.payload.autoRunInfinite);
+
+      if (Object.keys(sessionUpdates).length > 0) {
+        await setState(sessionUpdates);
+      }
+      if (Object.keys(persistentUpdates).length > 0) {
+        await setPersistentSettings(persistentUpdates);
+      }
       return { ok: true };
     }
 
