@@ -95,6 +95,36 @@
     return resolved;
   }
 
+  function createTimeoutError(message) {
+    const error = new Error(message);
+    error.name = 'TimeoutError';
+    return error;
+  }
+
+  async function runWithTimeout(taskFactory, options) {
+    const config = options || {};
+    const timeoutMs = Number.isFinite(config.timeoutMs) ? config.timeoutMs : 0;
+    if (timeoutMs <= 0) {
+      return await taskFactory();
+    }
+
+    let timerId = null;
+    try {
+      return await Promise.race([
+        taskFactory(),
+        new Promise((_, reject) => {
+          timerId = setTimeout(() => {
+            reject(createTimeoutError(config.errorMessage || 'TMailor API request timed out.'));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timerId) {
+        clearTimeout(timerId);
+      }
+    }
+  }
+
   function buildApiUrl(baseUrl) {
     const normalizedBaseUrl = String(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
     return normalizedBaseUrl + '/api';
@@ -124,7 +154,7 @@
   async function callTmailorApi(options) {
     const config = options || {};
     const doFetch = getFetch(config.fetchImpl);
-    const response = await doFetch(buildApiUrl(config.baseUrl), {
+    const response = await runWithTimeout(() => doFetch(buildApiUrl(config.baseUrl), {
       method: 'POST',
       headers: {
         ...DEFAULT_HEADERS,
@@ -136,6 +166,9 @@
         ...(config.payload || {}),
       }),
       signal: config.signal,
+    }), {
+      timeoutMs: config.requestTimeoutMs,
+      errorMessage: `TMailor API ${config.action || 'request'} timed out after ${config.requestTimeoutMs}ms.`,
     });
 
     return await parseJsonResponse(response);
@@ -145,14 +178,80 @@
     const config = options || {};
     const doFetch = getFetch(config.fetchImpl);
     const normalizedBaseUrl = String(config.baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
-    const response = await doFetch(normalizedBaseUrl + '/', {
+    const response = await runWithTimeout(() => doFetch(normalizedBaseUrl + '/', {
       method: 'GET',
       headers: DEFAULT_HEADERS,
       signal: config.signal,
+    }), {
+      timeoutMs: config.requestTimeoutMs,
+      errorMessage: `TMailor homepage request timed out after ${config.requestTimeoutMs}ms.`,
     });
 
     if (!response.ok) {
       throw new Error('TMailor homepage request failed (' + response.status + ').');
+    }
+  }
+
+  async function retryTmailorApiOperation(options) {
+    const config = options || {};
+    const run = typeof config.run === 'function' ? config.run : null;
+    if (!run) {
+      throw new Error('retryTmailorApiOperation requires a run function.');
+    }
+
+    const maxRequestRetries = Number.isFinite(config.maxRequestRetries) ? config.maxRequestRetries : 2;
+    const retryDelayMs = Number.isFinite(config.retryDelayMs) ? config.retryDelayMs : 1500;
+    const sleep = typeof config.sleep === 'function'
+      ? config.sleep
+      : (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    let lastError = null;
+    for (let requestAttempt = 1; requestAttempt <= maxRequestRetries + 1; requestAttempt++) {
+      try {
+        return await run();
+      } catch (error) {
+        lastError = error;
+        const retryAttempt = requestAttempt;
+        if (retryAttempt > maxRequestRetries) {
+          break;
+        }
+
+        const waitMs = Math.max(0, retryDelayMs * retryAttempt);
+        if (typeof config.onRetry === 'function') {
+          await config.onRetry({
+            stage: config.stage || 'request',
+            pollAttempt: Number.isFinite(config.pollAttempt) ? config.pollAttempt : 1,
+            maxPollAttempts: Number.isFinite(config.maxPollAttempts) ? config.maxPollAttempts : 1,
+            retryAttempt,
+            maxRequestRetries,
+            waitMs,
+            error,
+          });
+        }
+
+        if (waitMs > 0) {
+          await sleep(waitMs);
+        }
+      }
+    }
+
+    throw lastError || new Error('TMailor API retry failed.');
+  }
+
+  async function checkTmailorApiConnectivity(options) {
+    try {
+      await warmupTmailorSession(options);
+      return {
+        ok: true,
+        status: 'ok',
+        message: 'API is reachable.',
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        status: 'error',
+        message: err?.message || 'TMailor API connectivity check failed.',
+      };
     }
   }
 
@@ -174,6 +273,15 @@
     if (!data) return [];
     if (Array.isArray(data)) return data;
     return Object.values(data);
+  }
+
+  function buildMessageCacheKey(message) {
+    const id = String(message?.id || message?.mailId || message?.email_code || '').trim();
+    const emailToken = String(message?.emailToken || message?.email_id || message?.email_token || '').trim();
+    const timestamp = Number(message?.timestamp) || 0;
+    const subject = normalizeText(message?.subject || '');
+    const combinedText = normalizeText(message?.combinedText || message?.text || message?.body || '');
+    return [id, emailToken, timestamp, subject, combinedText].join('|');
   }
 
   function parseMessageTimestamp(message, now) {
@@ -239,6 +347,7 @@
       fetchImpl: config.fetchImpl,
       baseUrl: config.baseUrl,
       signal: config.signal,
+      requestTimeoutMs: config.requestTimeoutMs,
     });
 
     if (data.msg !== 'ok') {
@@ -295,6 +404,9 @@
     const config = options || {};
     const maxAttempts = Number.isFinite(config.maxAttempts) ? config.maxAttempts : 20;
     const intervalMs = Number.isFinite(config.intervalMs) ? config.intervalMs : 3000;
+    const maxRequestRetries = Number.isFinite(config.maxRequestRetries) ? config.maxRequestRetries : 2;
+    const retryDelayMs = Number.isFinite(config.retryDelayMs) ? config.retryDelayMs : 1500;
+    const requestTimeoutMs = Number.isFinite(config.requestTimeoutMs) ? config.requestTimeoutMs : 12000;
     const now = Number.isFinite(config.now) ? config.now : Date.now();
     const excludedCodeSet = new Set(config.excludeCodes || []);
     const sleep = typeof config.sleep === 'function'
@@ -306,19 +418,51 @@
     }
 
     let lastListId = '';
+    let lastApiError = null;
+    const pendingMessages = new Map();
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const data = await callTmailorApi({
-        action: 'listinbox',
-        payload: {
-          accesstoken: config.accessToken,
-          curentToken: config.accessToken,
-        },
-        headers: lastListId ? { listid: lastListId } : {},
-        fetchImpl: config.fetchImpl,
-        baseUrl: config.baseUrl,
-        signal: config.signal,
-      });
+      if (typeof config.onPollStart === 'function') {
+        await config.onPollStart({
+          attempt,
+          maxAttempts,
+          listId: lastListId,
+        });
+      }
+
+      let data;
+      try {
+        data = await retryTmailorApiOperation({
+          stage: 'listinbox',
+          pollAttempt: attempt,
+          maxPollAttempts: maxAttempts,
+          maxRequestRetries,
+          retryDelayMs,
+          sleep,
+          onRetry: config.onRetry,
+          run: () => callTmailorApi({
+            action: 'listinbox',
+            payload: {
+              accesstoken: config.accessToken,
+              curentToken: config.accessToken,
+            },
+            headers: {},
+            fetchImpl: config.fetchImpl,
+            baseUrl: config.baseUrl,
+            signal: config.signal,
+            requestTimeoutMs,
+          }),
+        });
+      } catch (error) {
+        lastApiError = error;
+        if (attempt < maxAttempts) {
+          if (intervalMs > 0) {
+            await sleep(intervalMs);
+          }
+          continue;
+        }
+        break;
+      }
 
       if (data.msg !== 'ok') {
         throw new Error('TMailor inbox poll failed: ' + (data.code || data.msg || 'unknown_error'));
@@ -342,31 +486,91 @@
         .filter((entry) => entry.parsed)
         .map((entry) => ({ ...entry.raw, ...entry.parsed }));
 
-      const latestMatch = findLatestMatchingItem(messages, (message) => Boolean(message));
+      for (const message of messages) {
+        pendingMessages.set(buildMessageCacheKey(message), message);
+      }
+
+      const candidateMessages = Array.from(pendingMessages.values()).sort((left, right) => {
+        const rightTimestamp = Number(right?.timestamp) || 0;
+        const leftTimestamp = Number(left?.timestamp) || 0;
+        return rightTimestamp - leftTimestamp;
+      });
+
+      const latestMatch = findLatestMatchingItem(candidateMessages, (message) => Boolean(message));
+
+      if (typeof config.onPollAttempt === 'function') {
+        await config.onPollAttempt({
+          attempt,
+          maxAttempts,
+          matchedCount: candidateMessages.length,
+          candidateFound: Boolean(latestMatch),
+          listId: lastListId,
+        });
+      }
 
       if (latestMatch) {
-        let code = extractVerificationCode(latestMatch.subject + ' ' + latestMatch.combinedText);
+        let readFailed = false;
 
-        if (!code) {
-          const detail = await readTmailorMessage({
-            fetchImpl: config.fetchImpl,
-            baseUrl: config.baseUrl,
-            accessToken: config.accessToken,
-            message: latestMatch,
-            signal: config.signal,
-          });
-          code = extractVerificationCode(
-            String(detail.subject || '') + ' ' + String(detail.text || '') + ' ' + String(detail.body || '')
-          );
-        }
+        for (const candidate of candidateMessages) {
+          const candidateKey = buildMessageCacheKey(candidate);
+          let code = extractVerificationCode(candidate.subject + ' ' + candidate.combinedText);
 
-        if (code && !excludedCodeSet.has(code)) {
+          if (!code) {
+            let detail;
+            try {
+              detail = await retryTmailorApiOperation({
+                stage: 'read',
+                pollAttempt: attempt,
+                maxPollAttempts: maxAttempts,
+                maxRequestRetries,
+                retryDelayMs,
+                sleep,
+                onRetry: config.onRetry,
+                run: () => readTmailorMessage({
+                  fetchImpl: config.fetchImpl,
+                  baseUrl: config.baseUrl,
+                  accessToken: config.accessToken,
+                  message: candidate,
+                  signal: config.signal,
+                  requestTimeoutMs,
+                }),
+              });
+            } catch (error) {
+              lastApiError = error;
+              readFailed = true;
+              break;
+            }
+            code = extractVerificationCode(
+              String(detail.subject || '') + ' ' + String(detail.text || '') + ' ' + String(detail.body || '')
+            );
+          }
+
+          if (!code) {
+            pendingMessages.delete(candidateKey);
+            continue;
+          }
+
+          if (excludedCodeSet.has(code)) {
+            pendingMessages.delete(candidateKey);
+            continue;
+          }
+
           return {
             code: code,
-            emailTimestamp: latestMatch.timestamp || now,
-            mailId: latestMatch.id,
+            emailTimestamp: candidate.timestamp || now,
+            mailId: candidate.id,
             listId: lastListId,
           };
+        }
+
+        if (readFailed) {
+          if (attempt < maxAttempts) {
+            if (intervalMs > 0) {
+              await sleep(intervalMs);
+            }
+            continue;
+          }
+          break;
         }
       }
 
@@ -375,12 +579,19 @@
       }
     }
 
+    if (lastApiError) {
+      throw new Error(
+        'Step ' + config.step + ': TMailor API inbox polling failed after ' + maxAttempts + ' attempts. Last error: ' + lastApiError.message
+      );
+    }
+
     throw new Error(
       'Step ' + config.step + ': No matching verification email found on TMailor API after ' + maxAttempts + ' attempts.'
     );
   }
 
   return {
+    checkTmailorApiConnectivity: checkTmailorApiConnectivity,
     DEFAULT_BASE_URL: DEFAULT_BASE_URL,
     buildApiUrl: buildApiUrl,
     callTmailorApi: callTmailorApi,
