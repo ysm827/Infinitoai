@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 
 const {
   buildAutoRunStatusPayload,
+  buildAutoRunFailureRecord,
+  formatAutoRunLabel,
+  shouldStartNextInfiniteRunAfterManualFlow,
   shouldContinueAutoRunAfterError,
   summarizeAutoRunResult,
 } = require('../shared/auto-run.js');
@@ -29,6 +32,21 @@ test('auto run stops on stop and manual-handoff sentinel errors', () => {
   );
   assert.equal(
     shouldContinueAutoRunAfterError(new Error('Auto run handed off to manual continuation.')),
+    false
+  );
+});
+
+test('manual rounds restart the next loop only when infinite mode is enabled and stop was not requested', () => {
+  assert.equal(
+    shouldStartNextInfiniteRunAfterManualFlow({ autoRunInfinite: true, stopRequested: false }),
+    true
+  );
+  assert.equal(
+    shouldStartNextInfiniteRunAfterManualFlow({ autoRunInfinite: false, stopRequested: false }),
+    false
+  );
+  assert.equal(
+    shouldStartNextInfiniteRunAfterManualFlow({ autoRunInfinite: true, stopRequested: true }),
     false
   );
 });
@@ -105,6 +123,7 @@ test('buildAutoRunStatusPayload always includes sanitized success and failure co
       infiniteMode: false,
       successfulRuns: 3,
       failedRuns: 0,
+      failureBuckets: [],
       summaryMessage: '',
       summaryToast: '',
       waitUntilTimestamp: null,
@@ -132,10 +151,89 @@ test('buildAutoRunStatusPayload keeps wait metadata for timed auto-run pauses', 
       infiniteMode: true,
       successfulRuns: 6,
       failedRuns: 1,
+      failureBuckets: [],
       summaryMessage: '',
       summaryToast: '',
       waitUntilTimestamp: 1710000000000,
       waitReason: '33mail limit window',
+    }
+  );
+});
+
+test('buildAutoRunStatusPayload preserves grouped failure stats for sidepanel rendering', () => {
+  assert.deepEqual(
+    buildAutoRunStatusPayload({
+      phase: 'waiting_email',
+      currentRun: 2,
+      totalRuns: Number.POSITIVE_INFINITY,
+      infiniteMode: true,
+      successfulRuns: 0,
+      failedRuns: 1,
+      failureBuckets: [
+        {
+          key: 'step-4::mail',
+          step: 4,
+          reason: 'No matching verification email found on TMailor after N attempts',
+          count: 1,
+          lastRunLabel: '1/∞',
+          lastSeenAt: 1710000000000,
+          recentLogs: ['Run 1/∞ failed: Step 4 failed: No matching verification email found on TMailor after 20 attempts.'],
+        },
+      ],
+    }),
+    {
+      phase: 'waiting_email',
+      currentRun: 2,
+      totalRuns: Number.POSITIVE_INFINITY,
+      infiniteMode: true,
+      successfulRuns: 0,
+      failedRuns: 1,
+      failureBuckets: [
+        {
+          key: 'step-4::mail',
+          step: 4,
+          reason: 'No matching verification email found on TMailor after N attempts',
+          count: 1,
+          lastRunLabel: '1/∞',
+          lastSeenAt: 1710000000000,
+          recentLogs: ['Run 1/∞ failed: Step 4 failed: No matching verification email found on TMailor after 20 attempts.'],
+        },
+      ],
+      summaryMessage: '',
+      summaryToast: '',
+      waitUntilTimestamp: null,
+      waitReason: '',
+    }
+  );
+});
+
+test('formatAutoRunLabel renders finite and infinite run labels', () => {
+  assert.equal(
+    formatAutoRunLabel({ currentRun: 3, totalRuns: 5, infiniteMode: false }),
+    '3/5'
+  );
+  assert.equal(
+    formatAutoRunLabel({ currentRun: 7, totalRuns: Number.POSITIVE_INFINITY, infiniteMode: true }),
+    '7/∞'
+  );
+});
+
+test('buildAutoRunFailureRecord builds a normalized failure entry for grouped stats', () => {
+  assert.deepEqual(
+    buildAutoRunFailureRecord({
+      errorMessage: 'Step 7 failed: Could not find verification code input.',
+      currentRun: 4,
+      totalRuns: Number.POSITIVE_INFINITY,
+      infiniteMode: true,
+      step: 7,
+      timestamp: 123456,
+    }),
+    {
+      step: 7,
+      errorMessage: 'Step 7 failed: Could not find verification code input.',
+      logMessage: 'Run 4/∞ failed: Step 7 failed: Could not find verification code input.',
+      runLabel: '4/∞',
+      timestamp: 123456,
     }
   );
 });

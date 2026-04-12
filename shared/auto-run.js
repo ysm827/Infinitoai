@@ -27,6 +27,13 @@
     return message !== STOP_ERROR_MESSAGE && message !== AUTO_RUN_HANDOFF_MESSAGE;
   }
 
+  function shouldStartNextInfiniteRunAfterManualFlow({
+    autoRunInfinite = false,
+    stopRequested = false,
+  } = {}) {
+    return Boolean(autoRunInfinite) && !Boolean(stopRequested);
+  }
+
   function buildAutoRunStatusPayload({
     phase,
     currentRun,
@@ -34,6 +41,7 @@
     infiniteMode = false,
     successfulRuns = 0,
     failedRuns = 0,
+    failureBuckets = [],
     summaryMessage = '',
     summaryToast = '',
     waitUntilTimestamp = null,
@@ -46,10 +54,47 @@
       infiniteMode: Boolean(infiniteMode),
       successfulRuns: sanitizeRunCounter(successfulRuns),
       failedRuns: sanitizeRunCounter(failedRuns),
+      failureBuckets: Array.isArray(failureBuckets) ? failureBuckets : [],
       summaryMessage,
       summaryToast,
       waitUntilTimestamp: Number.isFinite(waitUntilTimestamp) ? waitUntilTimestamp : null,
       waitReason: typeof waitReason === 'string' ? waitReason : '',
+    };
+  }
+
+  function formatAutoRunLabel({
+    currentRun,
+    totalRuns,
+    infiniteMode = false,
+  } = {}) {
+    const run = Math.max(0, Number.parseInt(String(currentRun ?? 0).trim(), 10) || 0);
+    if (Boolean(infiniteMode) || totalRuns === Number.POSITIVE_INFINITY) {
+      return `${run}/∞`;
+    }
+    const total = Math.max(0, Number.parseInt(String(totalRuns ?? 0).trim(), 10) || 0);
+    return `${run}/${total}`;
+  }
+
+  function buildAutoRunFailureRecord({
+    errorMessage,
+    currentRun,
+    totalRuns,
+    infiniteMode = false,
+    step = 0,
+    timestamp = Date.now(),
+  } = {}) {
+    const runLabel = formatAutoRunLabel({
+      currentRun,
+      totalRuns,
+      infiniteMode,
+    });
+
+    return {
+      step,
+      errorMessage: getErrorMessage(errorMessage),
+      logMessage: `Run ${runLabel} failed: ${getErrorMessage(errorMessage)}`,
+      runLabel,
+      timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
     };
   }
 
@@ -95,6 +140,9 @@
 
   return {
     buildAutoRunStatusPayload,
+    buildAutoRunFailureRecord,
+    formatAutoRunLabel,
+    shouldStartNextInfiniteRunAfterManualFlow,
     shouldContinueAutoRunAfterError,
     summarizeAutoRunResult,
   };
