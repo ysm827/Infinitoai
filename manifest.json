@@ -10,7 +10,9 @@
     "debugger",
     "storage",
     "scripting",
-    "activeTab"
+    "activeTab",
+    "clipboardRead",
+    "clipboardWrite"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -22,6 +24,16 @@
     "default_path": "sidepanel/sidepanel.html"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "https://tmailor.com/*",
+        "https://challenges.cloudflare.com/*"
+      ],
+      "js": ["content/turnstile-screenxy-patch.js"],
+      "all_frames": true,
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://auth0.openai.com/*",

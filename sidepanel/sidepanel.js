@@ -27,9 +27,12 @@ const btnAutoContinue = document.getElementById('btn-auto-continue');
 const autoContinueBar = document.getElementById('auto-continue-bar');
 const autoContinueHint = document.getElementById('auto-continue-hint');
 const btnClearLog = document.getElementById('btn-clear-log');
+const btnLogScrollBottom = document.getElementById('btn-log-scroll-bottom');
 const inputVpsUrl = document.getElementById('input-vps-url');
+const btnToggleVpsUrl = document.getElementById('btn-toggle-vps-url');
 const displayRunSuccess = document.getElementById('display-run-success');
 const displayRunFailure = document.getElementById('display-run-failure');
+const runFailureDetails = document.getElementById('run-failure-details');
 const rowMailProvider = document.getElementById('row-mail-provider');
 const selectMailProvider = document.getElementById('select-mail-provider');
 const selectEmailSource = document.getElementById('select-email-source');
@@ -50,6 +53,8 @@ const inputRunInfinite = document.getElementById('input-run-infinite');
   const tbodyTmailorWhitelist = document.getElementById('tbody-tmailor-whitelist');
   const tbodyTmailorBlacklist = document.getElementById('tbody-tmailor-blacklist');
   const selectTmailorDomainMode = document.getElementById('select-tmailor-domain-mode');
+  const tmailorApiStatus = document.getElementById('tmailor-api-status');
+  const btnTmailorApiCode = document.getElementById('btn-tmailor-api-code');
 const mailDomainGroups = [...document.querySelectorAll('.mail-domain-group')];
 const mailDomainInputs = {
   '163': input33MailDomain163,
@@ -65,7 +70,18 @@ const {
 const {
   buildTopSettingPayload,
 } = SidepanelSettings;
-const { shouldDisableStepButton } = ManualStepControls;
+const { shouldDisableStepButton, shouldEnableStopButton } = ManualStepControls;
+const { isLogNearBottom, shouldShowScrollToBottomButton } = SidepanelLogScroll;
+const { buildRunStatsDetailsHtml, normalizeDisplayedAutoRunStats } = SidepanelRunStats;
+const { pickTmailorCandidate } = TmailorInput;
+const {
+  buildTmailorRejectedDomainMessage,
+  getClipboardReadDeniedMessage,
+  getNoTmailorEmailFoundMessage,
+  getTmailorValidationSuccessAction,
+  shouldFallbackToStep3AfterResume,
+  shouldRetryTmailorFetchAfterValidationFailure,
+} = TmailorPasteFeedback;
   const {
     normalizeTmailorDomainState,
     sanitizeTmailorDomainMode,
@@ -80,6 +96,9 @@ const { shouldDisableStepButton } = ManualStepControls;
 const { buildToastKey, canonicalizeToastMessage, getToastDuration } = ToastFeedback;
   let mailDomainSettingsState = createDefault33MailDomainSettings();
   let tmailorDomainState = normalizeTmailorDomainState();
+  let tmailorApiStatusState = { ok: false, status: 'idle', message: 'TMailor API not checked yet.' };
+  let autoRunPhaseState = 'idle';
+  let keepLogPinnedToBottom = true;
   renderTmailorModeOptions();
 
 const ACTION_ICONS = {
@@ -114,6 +133,14 @@ const ACTION_ICONS = {
     <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M21 12a9 9 0 1 1-3.2-6.9"></path>
       <path d="M21 3v6h-6"></path>
+    </svg>
+  `,
+  apiCode: `
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+      <path d="M3 8l9 6 9-6"></path>
+      <path d="M8 12h2"></path>
+      <path d="M8 16h4"></path>
     </svg>
   `,
   eye: `
@@ -230,6 +257,7 @@ async function restoreState() {
     selectEmailSource.value = sanitizeEmailSource(state.emailSource);
     mailDomainSettingsState = normalize33MailDomainSettings(state.mailDomainSettings);
     tmailorDomainState = normalizeTmailorDomainState(state.tmailorDomainState);
+    tmailorApiStatusState = state.tmailorApiStatus || tmailorApiStatusState;
     inputAutoRotateMailProvider.checked = Boolean(state.autoRotateMailProvider);
     if (state.inbucketHost) {
       inputInbucketHost.value = state.inbucketHost;
@@ -258,7 +286,9 @@ async function restoreState() {
     updateMailProviderUI();
     updateEmailSourceUI();
     renderTmailorDomainTables();
+    renderTmailorApiStatus();
     updateRunModeUI();
+    syncLogScrollUi();
   } catch (err) {
     console.error('Failed to restore state:', err);
   }
@@ -269,10 +299,14 @@ function syncPasswordField(state) {
 }
 
 function updateAutoRunStatsDisplay(stats = {}) {
-  const successfulRuns = Math.max(0, Number.parseInt(String(stats.successfulRuns ?? 0), 10) || 0);
-  const failedRuns = Math.max(0, Number.parseInt(String(stats.failedRuns ?? 0), 10) || 0);
+  const normalizedStats = normalizeDisplayedAutoRunStats(stats);
+  const successfulRuns = normalizedStats.successfulRuns;
+  const failedRuns = normalizedStats.failedRuns;
   displayRunSuccess.textContent = `成功 ${successfulRuns}`;
   displayRunFailure.textContent = `失败 ${failedRuns}`;
+  if (runFailureDetails) {
+    runFailureDetails.innerHTML = buildRunStatsDetailsHtml(normalizedStats);
+  }
 }
 
 function updateMailProviderUI() {
@@ -317,6 +351,8 @@ function updateEmailSourceUI() {
   rowTmailorDomains.style.display = isTmailor ? '' : 'none';
   update33MailGroupUI();
   updateMailProviderUI();
+  renderTmailorApiStatus();
+  renderTmailorApiCodeButton(false);
 
   inputEmail.placeholder = is33Mail
     ? isGroupedMailProvider
@@ -333,6 +369,10 @@ function updateEmailSourceUI() {
     : isTmailor
       ? 'Use Auto to generate a TMailor address, then continue'
     : 'Use Auto to fetch Duck email, or paste manually, then continue';
+
+  if (isTmailor) {
+    void refreshTmailorApiStatus();
+  }
 }
 
 function createDomainRowHtml(domain, stats) {
@@ -456,6 +496,52 @@ function renderPasswordToggleButton() {
   btnTogglePassword.setAttribute('aria-label', btnTogglePassword.title);
 }
 
+function renderVpsToggleButton() {
+  const hidden = inputVpsUrl.type === 'password';
+  btnToggleVpsUrl.innerHTML = hidden ? ACTION_ICONS.eye : ACTION_ICONS.eyeOff;
+  btnToggleVpsUrl.title = hidden ? 'Show VPS URL' : 'Hide VPS URL';
+  btnToggleVpsUrl.setAttribute('aria-label', btnToggleVpsUrl.title);
+}
+
+function renderTmailorApiStatus() {
+  if (!tmailorApiStatus) {
+    return;
+  }
+
+  const status = tmailorApiStatusState?.status || 'idle';
+  const message = tmailorApiStatusState?.message || 'TMailor API not checked yet.';
+  tmailorApiStatus.className = `tmailor-api-status tmailor-api-status-${status === 'ok' ? 'ok' : status === 'error' ? 'error' : 'idle'}`;
+  tmailorApiStatus.textContent = message;
+}
+
+function renderTmailorApiCodeButton(isBusy = false) {
+  if (!btnTmailorApiCode) {
+    return;
+  }
+
+  const isTmailor = sanitizeEmailSource(selectEmailSource.value) === 'tmailor';
+  btnTmailorApiCode.innerHTML = isBusy ? ACTION_ICONS.busy : ACTION_ICONS.apiCode;
+  btnTmailorApiCode.classList.toggle('is-busy', isBusy);
+  btnTmailorApiCode.disabled = !isTmailor || isBusy;
+  btnTmailorApiCode.title = isBusy
+    ? 'Fetching current mailbox code via API...'
+    : 'Fetch current mailbox code via API';
+  btnTmailorApiCode.setAttribute('aria-label', btnTmailorApiCode.title);
+}
+
+async function refreshTmailorApiStatus() {
+  try {
+    tmailorApiStatusState = { ok: false, status: 'idle', message: 'Checking TMailor API...' };
+    renderTmailorApiStatus();
+    const response = await chrome.runtime.sendMessage({ type: 'CHECK_TMAILOR_API_STATUS', source: 'sidepanel' });
+    tmailorApiStatusState = response?.tmailorApiStatus || { ok: false, status: 'error', message: 'TMailor API check failed.' };
+  } catch (err) {
+    tmailorApiStatusState = { ok: false, status: 'error', message: `TMailor API check failed: ${err.message}` };
+  }
+
+  renderTmailorApiStatus();
+}
+
 async function copyFieldValue(input, emptyMessage, successMessage) {
   const value = input.value.trim();
   if (!value) {
@@ -471,9 +557,21 @@ async function copyFieldValue(input, emptyMessage, successMessage) {
   }
 }
 
+async function copyTextValue(value, successMessage) {
+  try {
+    await navigator.clipboard.writeText(String(value || ''));
+    showToast(successMessage, 'success', 2500);
+    return true;
+  } catch (err) {
+    showToast(`Current code: ${value} (clipboard unavailable: ${err.message})`, 'warn', 4200);
+    return false;
+  }
+}
+
 function renderStaticActionButtons() {
   btnCopyEmail.innerHTML = ACTION_ICONS.copy;
   btnCopyPassword.innerHTML = ACTION_ICONS.copy;
+  renderTmailorApiCodeButton(false);
 }
 
 function formatAutoRunWaitUntil(waitUntilTimestamp) {
@@ -531,7 +629,12 @@ function updateButtonStates() {
     btn.disabled = shouldDisableStepButton({ anyRunning, step, statuses });
   }
 
-  updateStopButtonState(anyRunning || autoContinueBar.style.display !== 'none');
+  updateStopButtonState(shouldEnableStopButton({
+    anyRunning,
+    autoContinueVisible: autoContinueBar.style.display !== 'none',
+    autoRunPhase: autoRunPhaseState,
+    statuses,
+  }));
 }
 
 function updateStopButtonState(active) {
@@ -580,6 +683,7 @@ function updateStatusDisplay(state) {
 }
 
 function appendLog(entry) {
+  const shouldPinAfterAppend = keepLogPinnedToBottom || isLogNearBottom(getLogScrollMetrics());
   const time = new Date(entry.timestamp).toLocaleTimeString('en-US', { hour12: false });
   const levelLabel = entry.level.toUpperCase();
   const line = document.createElement('div');
@@ -597,13 +701,54 @@ function appendLog(entry) {
 
   line.innerHTML = html;
   logArea.appendChild(line);
-  logArea.scrollTop = logArea.scrollHeight;
+  if (shouldPinAfterAppend) {
+    scrollLogToBottom(true);
+    return;
+  }
+
+  syncLogScrollUi();
 }
 
 function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+function getLogScrollMetrics() {
+  return {
+    scrollTop: logArea.scrollTop,
+    clientHeight: logArea.clientHeight,
+    scrollHeight: logArea.scrollHeight,
+    hasLogs: logArea.childElementCount > 0,
+  };
+}
+
+function syncLogScrollUi() {
+  if (!btnLogScrollBottom) {
+    return;
+  }
+
+  const shouldShow = shouldShowScrollToBottomButton(getLogScrollMetrics());
+  btnLogScrollBottom.hidden = !shouldShow;
+  btnLogScrollBottom.classList.toggle('visible', shouldShow);
+}
+
+function scrollLogToBottom(force = false) {
+  if (!force && !keepLogPinnedToBottom) {
+    syncLogScrollUi();
+    return;
+  }
+
+  logArea.scrollTop = logArea.scrollHeight;
+  keepLogPinnedToBottom = true;
+  syncLogScrollUi();
+}
+
+function clearLogArea() {
+  logArea.innerHTML = '';
+  keepLogPinnedToBottom = true;
+  syncLogScrollUi();
 }
 
 function setMailDomainForProvider(provider, value) {
@@ -613,9 +758,16 @@ function setMailDomainForProvider(provider, value) {
   });
 }
 
-async function fetchEmailAddress() {
-  btnFetchEmail.disabled = true;
-  renderFetchButton(true);
+async function fetchEmailAddress(options = {}) {
+  const {
+    manageButtonState = true,
+    suppressErrorToast = false,
+  } = options;
+
+  if (manageButtonState) {
+    btnFetchEmail.disabled = true;
+    renderFetchButton(true);
+  }
 
   try {
     const response = await chrome.runtime.sendMessage({
@@ -650,18 +802,16 @@ async function fetchEmailAddress() {
     );
     return response.email;
   } catch (err) {
-    showToast(`${getEmailSourceLabel()} error: ${err.message}`, 'error');
+    if (!suppressErrorToast) {
+      showToast(`${getEmailSourceLabel()} error: ${err.message}`, 'error');
+    }
     throw err;
   } finally {
-    btnFetchEmail.disabled = false;
-    renderFetchButton(false);
+    if (manageButtonState) {
+      btnFetchEmail.disabled = false;
+      renderFetchButton(false);
+    }
   }
-}
-
-function getClipboardEmailCandidate(rawText) {
-  const text = String(rawText || '').trim();
-  const match = text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
-  return (match?.[0] || text).trim();
 }
 
 async function pasteAndValidateTmailorEmail() {
@@ -669,17 +819,64 @@ async function pasteAndValidateTmailorEmail() {
   renderFetchButton(true);
 
   try {
-    const clipboardText = await navigator.clipboard.readText();
-    const candidate = getClipboardEmailCandidate(clipboardText);
+    const inputText = inputEmail.value.trim();
+    let clipboardText = '';
+    let clipboardReadDenied = false;
+    if (!inputText) {
+      try {
+        clipboardText = await navigator.clipboard.readText();
+      } catch {
+        clipboardReadDenied = true;
+      }
+    }
+
+    const picked = pickTmailorCandidate(inputText, clipboardText);
+    const candidate = picked.candidate;
     const validation = validateTmailorEmail(tmailorDomainState, candidate);
 
     if (!validation.ok) {
       if (validation.reason === 'invalid_email') {
-        throw new Error('No valid email found in clipboard.');
+        throw new Error(!inputText && clipboardReadDenied
+          ? getClipboardReadDeniedMessage()
+          : getNoTmailorEmailFoundMessage());
       }
 
-      const modeLabel = tmailorDomainState.mode === 'whitelist_only' ? '当前仅白名单模式' : '当前域名规则';
-      throw new Error(`${validation.domain || 'unknown domain'} not allowed by ${modeLabel}.`);
+      if (shouldRetryTmailorFetchAfterValidationFailure(validation)) {
+        inputEmail.value = '';
+        await chrome.runtime.sendMessage({
+          type: 'SAVE_EMAIL',
+          source: 'sidepanel',
+          payload: { email: '' },
+        });
+
+        showToast(
+          buildTmailorRejectedDomainMessage(validation.domain, tmailorDomainState.mode),
+          'warn',
+          2800
+        );
+
+        try {
+          const freshEmail = await fetchEmailAddress({
+            manageButtonState: false,
+            suppressErrorToast: true,
+          });
+
+          if (autoContinueBar.style.display !== 'none' && freshEmail) {
+            autoContinueBar.style.display = 'none';
+            await chrome.runtime.sendMessage({
+              type: 'RESUME_AUTO_RUN',
+              source: 'sidepanel',
+              payload: { email: freshEmail },
+            });
+          }
+
+          return freshEmail;
+        } catch (fetchErr) {
+          throw new Error(`自动请求新的 TMailor 邮箱失败：${fetchErr.message}`);
+        }
+      }
+
+      throw new Error(buildTmailorRejectedDomainMessage(validation.domain, tmailorDomainState.mode));
     }
 
     inputEmail.value = validation.email;
@@ -689,18 +886,30 @@ async function pasteAndValidateTmailorEmail() {
       payload: { email: validation.email },
     });
 
-    if (autoContinueBar.style.display !== 'none') {
-      autoContinueBar.style.display = 'none';
-      await chrome.runtime.sendMessage({
+    const successAction = getTmailorValidationSuccessAction({
+      autoContinueVisible: autoContinueBar.style.display !== 'none',
+    });
+
+    if (successAction === 'resume_auto_run') {
+      const resumeResult = await chrome.runtime.sendMessage({
         type: 'RESUME_AUTO_RUN',
         source: 'sidepanel',
         payload: { email: validation.email },
       });
-      showToast(`Accepted ${validation.email} · resumed`, 'success', 3000);
-      return validation.email;
+      if (!shouldFallbackToStep3AfterResume(resumeResult)) {
+        autoContinueBar.style.display = 'none';
+        showToast(`Accepted ${validation.email} · resumed`, 'success', 3000);
+        return validation.email;
+      }
     }
 
-    showToast(`Accepted ${validation.email}`, 'success', 2600);
+    await persistCurrentTopSettings();
+    await chrome.runtime.sendMessage({
+      type: 'EXECUTE_STEP',
+      source: 'sidepanel',
+      payload: { step: 3, email: validation.email },
+    });
+    showToast(`Accepted ${validation.email}${picked.source === 'input' ? ' · from input' : ''} · starting step 3`, 'success', 3000);
     return validation.email;
   } catch (err) {
     showToast(`Paste check failed: ${err.message}`, 'error');
@@ -713,6 +922,7 @@ async function pasteAndValidateTmailorEmail() {
 
 function syncPasswordToggleLabel() {
   renderPasswordToggleButton();
+  renderVpsToggleButton();
 }
 
 // ============================================================
@@ -745,6 +955,37 @@ btnFetchEmail.addEventListener('click', async () => {
   await fetchEmailAddress().catch(() => {});
 });
 
+if (btnTmailorApiCode) {
+  btnTmailorApiCode.addEventListener('click', async () => {
+    renderTmailorApiCodeButton(true);
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'FETCH_TMAILOR_API_CODE',
+        source: 'sidepanel',
+      });
+
+      if (response?.error) {
+        throw new Error(response.error);
+      }
+      if (!response?.code) {
+        throw new Error('No verification code was returned.');
+      }
+
+      const copied = await copyTextValue(
+        response.code,
+        `API code ${response.code} copied`
+      );
+      if (!copied) {
+        showToast(`API code ${response.code}`, 'success', 3000);
+      }
+    } catch (err) {
+      showToast(`API code fetch failed: ${err.message}`, 'error');
+    } finally {
+      renderTmailorApiCodeButton(false);
+    }
+  });
+}
+
 btnCopyEmail.addEventListener('click', async () => {
   await copyFieldValue(inputEmail, 'Email is empty', 'Email copied');
 });
@@ -756,6 +997,11 @@ btnCopyPassword.addEventListener('click', async () => {
 btnTogglePassword.addEventListener('click', () => {
   inputPassword.type = inputPassword.type === 'password' ? 'text' : 'password';
   syncPasswordToggleLabel();
+});
+
+btnToggleVpsUrl.addEventListener('click', () => {
+  inputVpsUrl.type = inputVpsUrl.type === 'password' ? 'text' : 'password';
+  renderVpsToggleButton();
 });
 
 btnStop.addEventListener('click', async () => {
@@ -782,8 +1028,19 @@ btnAutoContinue.addEventListener('click', async () => {
     showToast('Fetch or paste an email first', 'warn');
     return;
   }
+  const resumeResult = await chrome.runtime.sendMessage({ type: 'RESUME_AUTO_RUN', source: 'sidepanel', payload: email ? { email } : {} });
+  if (!shouldFallbackToStep3AfterResume(resumeResult)) {
+    autoContinueBar.style.display = 'none';
+    return;
+  }
+
+  await persistCurrentTopSettings();
+  await chrome.runtime.sendMessage({
+    type: 'EXECUTE_STEP',
+    source: 'sidepanel',
+    payload: email ? { step: 3, email } : { step: 3 },
+  });
   autoContinueBar.style.display = 'none';
-  await chrome.runtime.sendMessage({ type: 'RESUME_AUTO_RUN', source: 'sidepanel', payload: email ? { email } : {} });
 });
 
 // Reset
@@ -797,7 +1054,7 @@ btnReset.addEventListener('click', async () => {
     inputEmail.value = '';
     displayStatus.textContent = 'Ready';
     statusBar.className = 'status-bar';
-    logArea.innerHTML = '';
+    clearLogArea();
     document.querySelectorAll('.step-row').forEach(row => row.className = 'step-row');
     document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
     btnAutoRun.disabled = false;
@@ -813,8 +1070,19 @@ btnReset.addEventListener('click', async () => {
 
 // Clear log
 btnClearLog.addEventListener('click', () => {
-  logArea.innerHTML = '';
+  clearLogArea();
 });
+
+logArea.addEventListener('scroll', () => {
+  keepLogPinnedToBottom = isLogNearBottom(getLogScrollMetrics());
+  syncLogScrollUi();
+});
+
+if (btnLogScrollBottom) {
+  btnLogScrollBottom.addEventListener('click', () => {
+    scrollLogToBottom(true);
+  });
+}
 
 async function saveTopSetting(payload) {
   await chrome.runtime.sendMessage({
@@ -954,7 +1222,7 @@ chrome.runtime.onMessage.addListener((message) => {
       inputEmail.value = '';
       displayStatus.textContent = 'Ready';
       statusBar.className = 'status-bar';
-      logArea.innerHTML = '';
+      clearLogArea();
       document.querySelectorAll('.step-row').forEach(row => row.className = 'step-row');
       document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
       updateStopButtonState(false);
@@ -978,6 +1246,13 @@ chrome.runtime.onMessage.addListener((message) => {
         tmailorDomainState = normalizeTmailorDomainState(message.payload.tmailorDomainState);
         renderTmailorDomainTables();
       }
+      if (message.payload.tmailorApiStatus) {
+        tmailorApiStatusState = message.payload.tmailorApiStatus;
+        renderTmailorApiStatus();
+      }
+      if (message.payload.autoRunStats) {
+        updateAutoRunStatsDisplay(message.payload.autoRunStats);
+      }
       if (message.payload.oauthUrl) {
         displayOauthUrl.textContent = message.payload.oauthUrl;
         displayOauthUrl.classList.add('has-value');
@@ -990,8 +1265,9 @@ chrome.runtime.onMessage.addListener((message) => {
     }
 
     case 'AUTO_RUN_STATUS': {
-      const { phase, currentRun, totalRuns, infiniteMode, summaryToast, successfulRuns, failedRuns, waitUntilTimestamp } = message.payload;
-      updateAutoRunStatsDisplay({ successfulRuns, failedRuns });
+      const { phase, currentRun, totalRuns, infiniteMode, summaryToast, waitUntilTimestamp } = message.payload;
+      autoRunPhaseState = phase || 'idle';
+      updateAutoRunStatsDisplay(message.payload);
       const runLabel = infiniteMode
         ? ` (${currentRun}/∞)`
         : totalRuns > 1 ? ` (${currentRun}/${totalRuns})` : '';
@@ -1015,22 +1291,24 @@ chrome.runtime.onMessage.addListener((message) => {
           break;
         }
         case 'complete':
+          autoRunPhaseState = 'idle';
           btnAutoRun.disabled = false;
           inputRunInfinite.disabled = false;
           btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Auto';
           autoContinueBar.style.display = 'none';
-          updateStopButtonState(false);
+          updateButtonStates();
           updateRunModeUI();
           if (summaryToast) {
             showToast(summaryToast, 'success', 4200);
           }
           break;
         case 'stopped':
+          autoRunPhaseState = 'idle';
           btnAutoRun.disabled = false;
           inputRunInfinite.disabled = false;
           btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Auto';
           autoContinueBar.style.display = 'none';
-          updateStopButtonState(false);
+          updateButtonStates();
           updateRunModeUI();
           if (summaryToast) {
             showToast(summaryToast, 'warn', 3600);
@@ -1073,8 +1351,10 @@ btnTheme.addEventListener('click', () => {
 
 initTheme();
 renderStaticActionButtons();
+renderTmailorApiStatus();
 restoreState().then(() => {
   syncPasswordToggleLabel();
   updateButtonStates();
   updateRunModeUI();
+  syncLogScrollUi();
 });

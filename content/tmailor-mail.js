@@ -12,6 +12,7 @@ const { isMailFresh, parseMailTimestampCandidates } = MailFreshness;
 const EMAIL_REGEX = /\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/i;
 
 console.log(TMAILOR_PREFIX, 'Content script loaded on', location.href);
+log(`TMailor content script loaded on ${location.href}. Waiting for mailbox commands...`, 'info');
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'FETCH_TMAILOR_EMAIL') {
@@ -83,10 +84,118 @@ function isElementVisible(el) {
   return !rect || (rect.width > 0 && rect.height > 0);
 }
 
+function describeElementForLog(el, label = '') {
+  if (!el) {
+    return label ? `${label}: <missing>` : '<missing>';
+  }
+
+  const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+  const summary = [
+    String(el.tagName || '').toUpperCase() || 'UNKNOWN',
+    el.id ? `#${el.id}` : '',
+    typeof el.className === 'string' && el.className.trim()
+      ? `.${el.className.trim().replace(/\s+/g, '.')}`
+      : '',
+  ].filter(Boolean).join('');
+  const text = normalizeText(el.textContent || el.getAttribute?.('aria-label') || el.getAttribute?.('title') || '');
+  const rectText = rect && Number.isFinite(rect.left) && Number.isFinite(rect.top)
+    ? ` @(${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)})`
+    : '';
+  const textSuffix = text ? ` text="${text.slice(0, 80)}"` : '';
+  return `${label ? `${label}: ` : ''}${summary || '<unknown>'}${rectText}${textSuffix}`;
+}
+
 function findButtonByText(patterns) {
   const selectors = 'button, [role="button"], a, summary';
   const buttons = Array.from(document.querySelectorAll(selectors)).filter(isElementVisible);
   return buttons.find((button) => patterns.some((pattern) => pattern.test(button.textContent || ''))) || null;
+}
+
+function findNewEmailButton() {
+  const idButton = document.querySelector('#btnNewEmail');
+  if (isElementVisible(idButton)) {
+    return idButton;
+  }
+  return findButtonByText([/new\s*email/i]);
+}
+
+function findRefreshInboxButton() {
+  const refreshButton = document.querySelector('#refresh-inboxs');
+  if (isElementVisible(refreshButton)) {
+    return refreshButton;
+  }
+  return findButtonByText([/^refresh$/i, /\brefresh\b/i]);
+}
+
+let mailboxInterruptionSweepActive = false;
+
+async function runMailboxInterruptionSweep(options = {}) {
+  if (mailboxInterruptionSweepActive) {
+    return false;
+  }
+
+  const {
+    reason = '',
+    includeCloudflare = true,
+    monetizationTimeoutMs = 15000,
+    interstitialTimeoutMs = 5000,
+    cloudflareTimeoutMs = 12000,
+  } = options;
+
+  mailboxInterruptionSweepActive = true;
+  try {
+    assertNoFatalMailboxError();
+
+    const handledMonetizationAd = await handleMonetizationVideoAd(monetizationTimeoutMs);
+    if (handledMonetizationAd) {
+      if (reason) {
+        log(`TMailor: Interruption sweep handled a mailbox blocker during ${reason}`, 'info');
+      }
+      return true;
+    }
+
+    const handledInterstitialAd = await handleDismissibleInterstitialAd(interstitialTimeoutMs);
+    if (handledInterstitialAd) {
+      if (reason) {
+        log(`TMailor: Interruption sweep handled a mailbox blocker during ${reason}`, 'info');
+      }
+      return true;
+    }
+
+    if (includeCloudflare) {
+      const clearedCloudflare = await ensureCloudflareChallengeClearedOrThrow(cloudflareTimeoutMs);
+      if (clearedCloudflare) {
+        if (reason) {
+          log(`TMailor: Interruption sweep handled a mailbox blocker during ${reason}`, 'info');
+        }
+        return true;
+      }
+    }
+
+    assertNoManualTakeoverBlockers();
+    return false;
+  } finally {
+    mailboxInterruptionSweepActive = false;
+  }
+}
+
+async function sleepWithMailboxPatrol(durationMs, options = {}) {
+  const totalMs = Math.max(0, Number(durationMs) || 0);
+  if (!totalMs) {
+    return;
+  }
+
+  const sliceMs = Math.max(50, Number.isFinite(options.sliceMs) ? options.sliceMs : 250);
+  let remainingMs = totalMs;
+
+  while (remainingMs > 0) {
+    throwIfStopped();
+    const chunkMs = Math.min(sliceMs, remainingMs);
+    await sleep(chunkMs);
+    remainingMs -= chunkMs;
+
+    await runMailboxInterruptionSweep(options);
+  }
 }
 
 function findCloudflareConfirmButton() {
@@ -98,12 +207,12 @@ function findCloudflareConfirmButton() {
 }
 
 function findCloudflareCheckboxTarget() {
-  const iframe = document.querySelector(
-    'iframe[src*="challenges.cloudflare.com"], ' +
-    'iframe[title*="Cloudflare"], ' +
-    'iframe[title*="security challenge"], ' +
-    'iframe[title*="Widget containing"]'
-  );
+  const visibleChallengeContainer = findVisibleCloudflareChallengeContainer();
+  if (visibleChallengeContainer) {
+    return visibleChallengeContainer;
+  }
+
+  const iframe = findVisibleCloudflareChallengeIframe();
   if (isElementVisible(iframe)) {
     return iframe;
   }
@@ -117,6 +226,199 @@ function findCloudflareCheckboxTarget() {
   });
 
   return textTarget || null;
+}
+
+function findVisibleCloudflareChallengeContainer() {
+  const fullPageWrapper = document.querySelector('.main-wrapper[role="main"]');
+  const hasTurnstileResponse = document.querySelector('input[name="cf-turnstile-response"], input[id*="cf-chl-widget"][id$="_response"]');
+  if (isElementVisible(fullPageWrapper) && hasTurnstileResponse) {
+    return fullPageWrapper;
+  }
+
+  const directSelector = [
+    '.cf-turnstile',
+    '.html-captcha',
+    '[class*="cf-turnstile"]',
+    '[class*="turnstile"]',
+  ].join(', ');
+  const directMatch = document.querySelector(directSelector);
+  if (isElementVisible(directMatch)) {
+    return directMatch;
+  }
+
+  const responseInput = document.querySelector('input[name="cf-turnstile-response"], input[id*="cf-chl-widget"][id$="_response"]');
+  if (!responseInput) {
+    return null;
+  }
+
+  let current = responseInput.parentElement || null;
+  while (current) {
+    if (isElementVisible(current)) {
+      return current;
+    }
+    current = current.parentElement || null;
+  }
+
+  return null;
+}
+
+function findVisibleCloudflareChallengeIframe() {
+  const iframe = document.querySelector(
+    'iframe[src*="challenges.cloudflare.com"], ' +
+    'iframe[title*="Cloudflare"], ' +
+    'iframe[title*="security challenge"], ' +
+    'iframe[title*="Widget containing"], ' +
+    'iframe[title*="安全质询"], ' +
+    'iframe[title*="Cloudflare 安全质询"]'
+  );
+  return isElementVisible(iframe) ? iframe : null;
+}
+
+function hasCloudflareChallengeText() {
+  const bodyText = normalizeText(document.body?.innerText || '');
+  return /please verify that you are not a robot|请验证您不是机器人|cloudflare/i.test(bodyText);
+}
+
+function getSoftCloudflareFirewallText() {
+  const currentEmailInput = getCurrentMailboxInput();
+  if (!currentEmailInput) {
+    return '';
+  }
+
+  return normalizeText([
+    currentEmailInput.value,
+    currentEmailInput.getAttribute?.('title'),
+    currentEmailInput.getAttribute?.('placeholder'),
+    currentEmailInput.getAttribute?.('aria-label'),
+  ].filter(Boolean).join(' '));
+}
+
+function hasSoftCloudflareFirewallMessage() {
+  const text = getSoftCloudflareFirewallText();
+  return /please confirm you are not a robot|performing the operation too fast/i.test(text);
+}
+
+function getCloudflareResponseTokenLength() {
+  const input = document.querySelector('input[name="cf-turnstile-response"], input[id*="cf-chl-widget"][id$="_response"]');
+  return String(input?.value || '').trim().length;
+}
+
+function hasCloudflareChallengeShell() {
+  return Boolean(findVisibleCloudflareChallengeContainer() || findVisibleCloudflareChallengeIframe());
+}
+
+function describeCloudflareChallengeForLog() {
+  const wrapper = document.querySelector('.main-wrapper[role="main"]');
+  const hiddenInput = document.querySelector('input[name="cf-turnstile-response"], input[id*="cf-chl-widget"][id$="_response"]');
+  const iframe = findVisibleCloudflareChallengeIframe();
+  const container = findVisibleCloudflareChallengeContainer();
+  const tokenLength = getCloudflareResponseTokenLength();
+
+  if (isElementVisible(wrapper) && hiddenInput) {
+    return `full-page challenge (${describeElementForLog(wrapper, 'wrapper')}; hiddenInput=#${hiddenInput.id || 'cf-turnstile-response'}; tokenLength=${tokenLength})`;
+  }
+  if (iframe) {
+    return `iframe challenge (${describeElementForLog(iframe, 'iframe')}; tokenLength=${tokenLength})`;
+  }
+  if (container) {
+    return `container challenge (${describeElementForLog(container, 'container')}; tokenLength=${tokenLength})`;
+  }
+  if (hiddenInput) {
+    return `hidden-input challenge (input#${hiddenInput.id || 'cf-turnstile-response'}; tokenLength=${tokenLength})`;
+  }
+  if (hasSoftCloudflareFirewallMessage()) {
+    return `soft-firewall challenge (${describeElementForLog(getCurrentMailboxInput(), 'currentEmail')}; text="${getSoftCloudflareFirewallText().slice(0, 120)}")`;
+  }
+  return 'challenge shell present, but no specific target was identified';
+}
+
+function getCurrentMailboxInput() {
+  const input = document.querySelector('input[name="currentEmailAddress"]');
+  return isElementVisible(input) ? input : null;
+}
+
+function getCurrentMailboxInputValue() {
+  const input = getCurrentMailboxInput();
+  return input ? String(input.value || input.getAttribute?.('value') || '').trim() : '';
+}
+
+function detectTmailorPageState() {
+  if (isFatalMailboxErrorVisible()) {
+    return {
+      kind: 'fatal_server_error',
+      element: getCurrentMailboxInput(),
+      message: 'An error occurred on the server. Please try again later',
+    };
+  }
+
+  const monetizationDialog = findMonetizationVideoDialog();
+  if (monetizationDialog) {
+    return {
+      kind: 'monetization_video_ad',
+      element: monetizationDialog,
+    };
+  }
+
+  const adBox = findInterstitialAdBox();
+  if (adBox) {
+    return {
+      kind: 'blocking_ad',
+      element: adBox,
+    };
+  }
+
+  const wrapper = document.querySelector('.main-wrapper[role="main"]');
+  const hiddenTurnstileResponse = document.querySelector('input[name="cf-turnstile-response"], input[id*="cf-chl-widget"][id$="_response"]');
+  if (isElementVisible(wrapper) && hiddenTurnstileResponse && /正在进行安全验证|security verification|performance and security by cloudflare|enable javascript and cookies to continue/i.test(normalizeText(document.body?.innerText || ''))) {
+    return {
+      kind: 'cloudflare_full_page',
+      element: wrapper,
+    };
+  }
+
+  const turnstileContainer = findVisibleCloudflareChallengeContainer();
+  const confirmButton = findCloudflareConfirmButton();
+  if (turnstileContainer || confirmButton) {
+    return {
+      kind: 'cloudflare_turnstile',
+      element: turnstileContainer || confirmButton,
+      confirmButton,
+    };
+  }
+
+  const currentEmail = getCurrentMailboxInputValue();
+  const displayedEmail = collectDisplayedEmails().find((candidate) => candidate.email);
+  const refreshButton = findRefreshInboxButton();
+  const newEmailButton = findNewEmailButton();
+  const currentInputEmailMatch = currentEmail.match(EMAIL_REGEX);
+
+  if ((displayedEmail?.email || currentInputEmailMatch?.[0]) && refreshButton) {
+    return {
+      kind: 'mailbox_ready',
+      email: (displayedEmail?.email || currentInputEmailMatch?.[0] || '').toLowerCase(),
+      element: getCurrentMailboxInput() || refreshButton,
+    };
+  }
+
+  if (currentEmail && /please confirm you are not a robot|performing the operation too fast/i.test(currentEmail)) {
+    return {
+      kind: 'cloudflare_turnstile',
+      element: getCurrentMailboxInput(),
+      confirmButton,
+    };
+  }
+
+  if (getCurrentMailboxInput() && newEmailButton) {
+    return {
+      kind: 'mailbox_idle',
+      element: getCurrentMailboxInput(),
+    };
+  }
+
+  return {
+    kind: 'unknown',
+    element: null,
+  };
 }
 
 function isElementDisabled(el) {
@@ -144,6 +446,29 @@ function getElementCenterRect(el) {
 
   return {
     centerX: rect.left + (rect.width / 2),
+    centerY: rect.top + (rect.height / 2),
+  };
+}
+
+function getCloudflareCheckboxRect(target) {
+  if (!target || typeof target.getBoundingClientRect !== 'function') {
+    return null;
+  }
+
+  const rect = target.getBoundingClientRect();
+  if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.top) || rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+
+  const targetSummary = `${String(target.tagName || '').toUpperCase()} ${String(target.className || '')} ${String(target.id || '')}`.toLowerCase();
+  const looksLikeTurnstile = /cf-turnstile|turnstile|cloudflare|html-captcha|iframe/.test(targetSummary);
+  if (!looksLikeTurnstile) {
+    return getElementCenterRect(target);
+  }
+
+  const offsetX = Math.max(26, Math.min(rect.width * 0.12, 36));
+  return {
+    centerX: rect.left + offsetX,
     centerY: rect.top + (rect.height / 2),
   };
 }
@@ -177,6 +502,16 @@ function isIgnoredCloseControl(el) {
 }
 
 function findBlockingAdCloseButton() {
+  const dismissClose = document.querySelector('#dismiss-button-element > div');
+  if (isElementVisible(dismissClose)) {
+    return dismissClose;
+  }
+
+  const dismissRoot = document.querySelector('#dismiss-button-element');
+  if (isElementVisible(dismissRoot)) {
+    return dismissRoot;
+  }
+
   const selectors = 'button, [role="button"], a, summary';
   const buttons = Array.from(document.querySelectorAll(selectors)).filter(isElementVisible);
   return buttons.find((button) => {
@@ -189,23 +524,199 @@ function findBlockingAdCloseButton() {
   }) || null;
 }
 
+function findInterstitialAdBox() {
+  const adBox = document.querySelector('#ad_position_box');
+  return isElementVisible(adBox) ? adBox : null;
+}
+
+async function handleDismissibleInterstitialAd(timeoutMs = 4000) {
+  const start = Date.now();
+  let loggedWaiting = false;
+  let clickedClose = false;
+  let loggedOverlayDetected = false;
+
+  while (Date.now() - start < timeoutMs) {
+    throwIfStopped();
+    const adBox = findInterstitialAdBox();
+    if (!adBox) {
+      return clickedClose;
+    }
+
+    const closeButton = findBlockingAdCloseButton();
+    if (!loggedOverlayDetected) {
+      loggedOverlayDetected = true;
+      log(`TMailor: Blocking ad overlay detected (${describeElementForLog(adBox, 'overlay')})`, 'info');
+    }
+    if (closeButton) {
+      log(`TMailor: Blocking overlay detected, clicking Close (${describeElementForLog(closeButton, 'close')})`, 'info');
+      simulateClick(closeButton);
+      clickedClose = true;
+      await sleep(900);
+      continue;
+    }
+
+    if (!loggedWaiting) {
+      loggedWaiting = true;
+      log('TMailor: Waiting for the ad overlay Close button to appear after detecting the overlay', 'info');
+    }
+
+    await sleep(500);
+  }
+
+  return clickedClose;
+}
+
+function findMonetizationVideoDialog() {
+  const selectors = [
+    'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog',
+    '.fc-monetization-dialog.fc-dialog',
+  ];
+
+  for (const selector of selectors) {
+    const dialog = document.querySelector(selector);
+    if (isElementVisible(dialog)) {
+      return dialog;
+    }
+  }
+
+  return null;
+}
+
+function findMonetizationVideoPlayButton() {
+  const selector = 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog > div > div.fc-list-container > button';
+  const exactMatch = document.querySelector(selector);
+  if (isElementVisible(exactMatch)) {
+    return exactMatch;
+  }
+
+  const dialog = findMonetizationVideoDialog();
+  if (!dialog || typeof dialog.querySelectorAll !== 'function') {
+    return findButtonByText([/view a short ad/i, /watch.*ad/i, /short ad/i]);
+  }
+
+  return Array.from(dialog.querySelectorAll('button, [role="button"], a')).find((button) => {
+    if (!isElementVisible(button)) {
+      return false;
+    }
+    return /view a short ad|watch.*ad|short ad/i.test(normalizeText(button.textContent || ''));
+  }) || null;
+}
+
+function findMonetizationVideoCloseButton() {
+  const exactMatch = document.querySelector('#dismiss-button-element > div');
+  if (isElementVisible(exactMatch)) {
+    return exactMatch;
+  }
+
+  const closeRoot = document.querySelector('#dismiss-button-element');
+  if (isElementVisible(closeRoot)) {
+    return closeRoot;
+  }
+
+  return null;
+}
+
+async function handleMonetizationVideoAd(timeoutMs = 20000) {
+  const start = Date.now();
+  let clickedPlay = false;
+  let loggedPlay = false;
+  let loggedWaitingForClose = false;
+  let loggedDialogDetected = false;
+
+  while (Date.now() - start < timeoutMs) {
+    throwIfStopped();
+    const dialog = findMonetizationVideoDialog();
+    if (dialog && !loggedDialogDetected) {
+      loggedDialogDetected = true;
+      log(`TMailor: Monetization video dialog detected (${describeElementForLog(dialog, 'dialog')})`, 'info');
+    }
+    const playButton = findMonetizationVideoPlayButton();
+    if (playButton) {
+      if (!loggedPlay) {
+        loggedPlay = true;
+        log(`TMailor: Monetization video ad overlay detected, clicking Play (${describeElementForLog(playButton, 'play')})`, 'info');
+      }
+      simulateClick(playButton);
+      clickedPlay = true;
+      await sleep(1200);
+      continue;
+    }
+
+    const closeButton = findMonetizationVideoCloseButton();
+    if (closeButton) {
+      log(`TMailor: Monetization video ad finished, clicking Close (${describeElementForLog(closeButton, 'close')})`, 'info');
+      simulateClick(closeButton);
+      await sleep(1200);
+      return true;
+    }
+
+    const dialogVisible = Boolean(dialog);
+    if (!dialogVisible && !clickedPlay) {
+      return false;
+    }
+
+    if (clickedPlay && !loggedWaitingForClose) {
+      loggedWaitingForClose = true;
+      log('TMailor: Waiting for the monetization ad Close button to appear', 'info');
+    }
+
+    await sleep(1000);
+  }
+
+  if (clickedPlay || findMonetizationVideoDialog() || findMonetizationVideoCloseButton()) {
+    log('TMailor: Monetization video ad is still blocking the mailbox after the wait timeout', 'warn');
+  }
+  return false;
+}
+
 function isCloudflareChallengeVisible() {
-  const bodyText = normalizeText(document.body?.innerText || '');
-  return /please verify that you are not a robot/i.test(bodyText);
+  return hasCloudflareChallengeText() || hasCloudflareChallengeShell() || hasSoftCloudflareFirewallMessage();
 }
 
 function isFatalMailboxErrorVisible() {
   const bodyText = normalizeText(document.body?.innerText || '');
-  return /an error occurred on the server\.\s*please try again later/i.test(bodyText);
+  if (/an error occurred on the server\.\s*please try again later/i.test(bodyText)) {
+    return true;
+  }
+
+  const currentEmailInput = document.querySelector('input[name="currentEmailAddress"]');
+  if (!isElementVisible(currentEmailInput)) {
+    return false;
+  }
+
+  const inputText = normalizeText([
+    currentEmailInput.value,
+    currentEmailInput.getAttribute?.('title'),
+    currentEmailInput.getAttribute?.('placeholder'),
+    currentEmailInput.getAttribute?.('aria-label'),
+  ].filter(Boolean).join(' '));
+
+  return Boolean(currentEmailInput.disabled) && /an error occurred on the server\.\s*please try again later/i.test(inputText);
 }
 
 function assertNoFatalMailboxError() {
   if (isFatalMailboxErrorVisible()) {
-    throw new Error('TMailor server error detected while refreshing the mailbox. Please change node and retry.');
+    throw new Error('TMailor server error detected while refreshing the mailbox. The node or current network path may be unstable. Change node first; if it still fails across nodes, try again later.');
+  }
+}
+
+function assertNoManualTakeoverBlockers() {
+  if (isCloudflareChallengeVisible()) {
+    throw new Error('Cloudflare challenge detected on TMailor. Temporary failure, please take over manually.');
+  }
+
+  if (findBlockingAdCloseButton()) {
+    throw new Error('Blocking overlay detected on TMailor. Temporary failure, please take over manually.');
   }
 }
 
 async function dismissBlockingOverlay(timeoutMs = 4000) {
+  const handledInterstitialAd = await handleDismissibleInterstitialAd(timeoutMs);
+  if (handledInterstitialAd) {
+    log('TMailor: Blocking overlay closed successfully', 'ok');
+    return true;
+  }
+
   const start = Date.now();
   let sawCloseButton = false;
 
@@ -220,7 +731,7 @@ async function dismissBlockingOverlay(timeoutMs = 4000) {
     }
 
     sawCloseButton = true;
-    log('TMailor: Blocking overlay detected, clicking Close', 'info');
+    log(`TMailor: Blocking overlay detected, clicking Close (${describeElementForLog(closeButton, 'close')})`, 'info');
     simulateClick(closeButton);
     await sleep(600);
 
@@ -236,6 +747,27 @@ async function dismissBlockingOverlay(timeoutMs = 4000) {
   return false;
 }
 
+async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = 12000) {
+  if (!isCloudflareChallengeVisible()) {
+    return false;
+  }
+
+  log('TMailor: Cloudflare challenge is blocking the mailbox, attempting automatic verification first', 'warn');
+  const handled = await waitForCloudflareConfirm(timeoutMs);
+  if (handled && !isCloudflareChallengeVisible()) {
+    log('TMailor: Cloudflare challenge cleared automatically', 'ok');
+    return true;
+  }
+
+  if (handled) {
+    log('TMailor: Cloudflare auto-attempt ran, but the challenge shell is still visible', 'warn');
+  } else {
+    log('TMailor: Cloudflare auto-attempt timed out before the challenge cleared', 'warn');
+  }
+
+  throw new Error('Cloudflare challenge detected on TMailor. Automatic verification did not complete, please take over manually.');
+}
+
 async function waitForCloudflareConfirm(timeoutMs = 12000) {
   const start = Date.now();
   const gracePeriodMs = Math.min(1500, timeoutMs);
@@ -245,11 +777,18 @@ async function waitForCloudflareConfirm(timeoutMs = 12000) {
   let loggedChallengeDetected = false;
   let loggedConfirmDisabled = false;
   let loggedWaitingForCheckbox = false;
+  let loggedWaitingForVerificationResult = false;
   let loggedPrematureConfirm = false;
+  let hasAttemptedCheckboxClick = false;
+  let loggedChallengeDetails = false;
+  let loggedResponseTokenDetected = false;
 
   while (Date.now() - start < timeoutMs) {
     throwIfStopped();
-    const challengeVisible = isCloudflareChallengeVisible();
+    const challengeTextVisible = hasCloudflareChallengeText();
+    const challengeShellVisible = hasCloudflareChallengeShell();
+    const challengeVisible = challengeTextVisible || challengeShellVisible;
+    const responseTokenLength = getCloudflareResponseTokenLength();
 
     if (!challengeVisible) {
       if (sawChallenge) {
@@ -274,43 +813,74 @@ async function waitForCloudflareConfirm(timeoutMs = 12000) {
       continue;
     }
 
+    if (!challengeTextVisible && sawChallenge && (hasAttemptedCheckboxClick || loggedConfirmDisabled)) {
+      const confirmButton = findCloudflareConfirmButton();
+      if (confirmButton && !isElementDisabled(confirmButton)) {
+        if (!challengeResolvedAt) {
+          challengeResolvedAt = Date.now();
+          log('TMailor: Cloudflare challenge shell remains, but verification looks complete', 'info');
+        }
+        log(`TMailor: Cloudflare verification detected (tokenLength=${responseTokenLength}), clicking Confirm`, 'info');
+        simulateClick(confirmButton);
+        await sleep(1200);
+        return true;
+      }
+    }
+
     sawChallenge = true;
     challengeResolvedAt = 0;
     if (!loggedChallengeDetected) {
       loggedChallengeDetected = true;
       log('TMailor: Cloudflare challenge detected, waiting for verification controls', 'info');
     }
+    if (!loggedChallengeDetails) {
+      loggedChallengeDetails = true;
+      log(`TMailor: Cloudflare challenge details: ${describeCloudflareChallengeForLog()}`, 'info');
+    }
+    if (responseTokenLength > 0 && !loggedResponseTokenDetected) {
+      loggedResponseTokenDetected = true;
+      log(`TMailor: Cloudflare response token detected (length=${responseTokenLength}). Waiting for Confirm to become clickable...`, 'info');
+    }
     const confirmButton = findCloudflareConfirmButton();
     if (confirmButton && !isElementDisabled(confirmButton) && !loggedPrematureConfirm) {
       loggedPrematureConfirm = true;
-      log('TMailor: Cloudflare Confirm button looks clickable before challenge clears, waiting for verification to finish', 'info');
+      log(`TMailor: Cloudflare Confirm button looks clickable before challenge clears, waiting for verification to finish (${describeElementForLog(confirmButton, 'confirm')})`, 'info');
     }
 
     if (confirmButton && isElementDisabled(confirmButton) && !loggedConfirmDisabled) {
       loggedConfirmDisabled = true;
-      log('TMailor: Cloudflare Confirm button is still disabled, waiting for checkbox verification', 'info');
+      log(`TMailor: Cloudflare Confirm button is still disabled, waiting for checkbox verification (${describeElementForLog(confirmButton, 'confirm')})`, 'info');
     }
 
     if (Date.now() - lastCheckboxAttemptAt >= 1500) {
       const checkboxTarget = findCloudflareCheckboxTarget();
-      const checkboxRect = getElementCenterRect(checkboxTarget);
+      const checkboxRect = getCloudflareCheckboxRect(checkboxTarget);
       if (checkboxRect) {
         lastCheckboxAttemptAt = Date.now();
-        log('TMailor: Cloudflare checkbox detected, waiting for challenge and clicking verification area', 'info');
+        hasAttemptedCheckboxClick = true;
+        log(`TMailor: Cloudflare checkbox detected, clicking verification area (${describeElementForLog(checkboxTarget, 'target')}; center=${Math.round(checkboxRect.centerX)},${Math.round(checkboxRect.centerY)})`, 'info');
 
-        if (String(checkboxTarget.tagName || '').toUpperCase() === 'IFRAME') {
+        try {
           await requestDebuggerClickAt(checkboxRect);
-        } else {
+        } catch (err) {
+          if (String(checkboxTarget.tagName || '').toUpperCase() === 'IFRAME') {
+            throw err;
+          }
+          log(`TMailor: Debugger click failed on Cloudflare container, falling back to DOM click: ${err?.message || err}`, 'warn');
           simulateClick(checkboxTarget);
         }
 
+        if (!loggedWaitingForVerificationResult) {
+          loggedWaitingForVerificationResult = true;
+          log('TMailor: Cloudflare checkbox click dispatched. Waiting for the challenge to report success before clicking Confirm...', 'info');
+        }
         await sleep(1600);
         continue;
       }
 
       if (!loggedWaitingForCheckbox) {
         loggedWaitingForCheckbox = true;
-        log('TMailor: Waiting for Cloudflare checkbox to render', 'info');
+        log(`TMailor: Waiting for Cloudflare checkbox to render. Current challenge details: ${describeCloudflareChallengeForLog()}`, 'info');
       }
     }
 
@@ -388,22 +958,30 @@ function collectDisplayedEmails() {
 
 async function waitForMailboxControls(timeout = 20000) {
   const start = Date.now();
+  let lastStateKind = '';
   while (Date.now() - start < timeout) {
     throwIfStopped();
+    const state = detectTmailorPageState();
+    if (state.kind !== lastStateKind) {
+      lastStateKind = state.kind;
+      log(`TMailor: Page state detected: ${state.kind}${state.email ? ` (${state.email})` : ''}${state.element ? ` (${describeElementForLog(state.element, 'element')})` : ''}`, 'info');
+    }
     assertNoFatalMailboxError();
-    if (await dismissBlockingOverlay()) {
-      await sleep(250);
+    const handledMonetizationAd = await handleMonetizationVideoAd(15000);
+    if (handledMonetizationAd) {
       continue;
     }
-    if (isCloudflareChallengeVisible()) {
-      await waitForCloudflareConfirm();
-      await sleep(250);
+    const handledInterstitialAd = await handleDismissibleInterstitialAd(5000);
+    if (handledInterstitialAd) {
       continue;
     }
-    const newEmailBtn = findButtonByText([/new\s*email/i]);
-    const refreshBtn = findButtonByText([/refresh/i]);
-    if (newEmailBtn || refreshBtn || collectDisplayedEmails().length > 0) {
-      await waitForCloudflareConfirm(2500);
+    await ensureCloudflareChallengeClearedOrThrow(Math.min(12000, Math.max(1000, timeout - (Date.now() - start))));
+    assertNoManualTakeoverBlockers();
+    const refreshedState = detectTmailorPageState();
+    if (refreshedState.kind === 'mailbox_idle' || refreshedState.kind === 'mailbox_ready') {
+      return;
+    }
+    if (findNewEmailButton() || findRefreshInboxButton() || collectDisplayedEmails().length > 0) {
       return;
     }
     await sleep(250);
@@ -424,7 +1002,7 @@ async function maybeChooseAllowedDomain(domainState) {
 
   simulateClick(options[0].element);
   log(`TMailor: Selected allowed domain ${options[0].domain}`);
-  await sleep(1200);
+  await sleepWithMailboxPatrol(1200, { reason: 'applying the selected mailbox domain' });
   return true;
 }
 
@@ -453,7 +1031,7 @@ async function fetchTmailorEmail(payload = {}) {
     }
   }
 
-  const newEmailButton = findButtonByText([/new\s*email/i]);
+  const newEmailButton = findNewEmailButton();
   if (!newEmailButton) {
     throw new Error('Could not find the TMailor "New Email" button.');
   }
@@ -464,11 +1042,12 @@ async function fetchTmailorEmail(payload = {}) {
     assertNoFatalMailboxError();
     simulateClick(newEmailButton);
     log(`TMailor: Clicked New Email (${attempt}/25)`);
-    await waitForCloudflareConfirm();
-    await sleep(1200);
+    await ensureCloudflareChallengeClearedOrThrow(12000);
+    assertNoManualTakeoverBlockers();
+    await sleepWithMailboxPatrol(1200, { reason: 'waiting for the new mailbox to generate' });
 
     await maybeChooseAllowedDomain(domainState);
-    await sleep(800);
+    await sleepWithMailboxPatrol(800, { reason: 'waiting for the mailbox domain selection to settle' });
     assertNoFatalMailboxError();
 
     const currentEmail = tryCurrentEmail();
@@ -546,12 +1125,15 @@ function findMailRows() {
     }
   }
 
-  return rows;
+  return rows.filter((element) => {
+    return !rows.some((other) => other !== element && typeof element.contains === 'function' && element.contains(other));
+  });
 }
 
 function parseMailRow(element, index) {
-  const combinedText = normalizeText(element.textContent || '');
-  const textLines = combinedText.split(/\n+/).map((line) => normalizeText(line)).filter(Boolean);
+  const rawText = String(element?.textContent || '');
+  const combinedText = normalizeText(rawText);
+  const textLines = rawText.split(/\n+/).map((line) => normalizeText(line)).filter(Boolean);
   const subject = textLines[1] || textLines[0] || '';
   const sender = textLines[0] || '';
   const timestamp = parseMailTimestampCandidates(textLines, { now: Date.now() });
@@ -568,32 +1150,53 @@ function parseMailRow(element, index) {
 
 async function refreshInbox() {
   assertNoFatalMailboxError();
-  await dismissBlockingOverlay();
+  await handleMonetizationVideoAd(15000);
+  await handleDismissibleInterstitialAd(5000);
+  await ensureCloudflareChallengeClearedOrThrow(12000);
+  assertNoManualTakeoverBlockers();
 
-  const refreshButton = findButtonByText([/refresh/i]);
+  const refreshButton = findRefreshInboxButton();
   if (refreshButton) {
     simulateClick(refreshButton);
-    await sleep(1200);
+    await sleepWithMailboxPatrol(1200, { reason: 'refreshing the inbox view' });
     assertNoFatalMailboxError();
-    await dismissBlockingOverlay();
-    await waitForCloudflareConfirm(2500);
+    await handleMonetizationVideoAd(15000);
+    await handleDismissibleInterstitialAd(5000);
+    await ensureCloudflareChallengeClearedOrThrow(12000);
+    assertNoManualTakeoverBlockers();
     return;
   }
 
   const inboxButton = findButtonByText([/inbox/i]);
   if (inboxButton) {
     simulateClick(inboxButton);
-    await sleep(900);
+    await sleepWithMailboxPatrol(900, { reason: 'returning to the inbox view' });
     assertNoFatalMailboxError();
-    await dismissBlockingOverlay();
-    await waitForCloudflareConfirm(2500);
+    await handleMonetizationVideoAd(15000);
+    await handleDismissibleInterstitialAd(5000);
+    await ensureCloudflareChallengeClearedOrThrow(12000);
+    assertNoManualTakeoverBlockers();
   }
+}
+
+async function settleMailDetailInterruptions() {
+  assertNoFatalMailboxError();
+  const handledMonetizationAd = await handleMonetizationVideoAd(15000);
+  if (handledMonetizationAd) {
+    log('TMailor: Mail detail view resumed after closing a monetization ad', 'info');
+  }
+  const handledInterstitialAd = await handleDismissibleInterstitialAd(5000);
+  if (handledInterstitialAd) {
+    log('TMailor: Mail detail view resumed after closing an interstitial overlay', 'info');
+  }
+  await ensureCloudflareChallengeClearedOrThrow(12000);
+  assertNoManualTakeoverBlockers();
 }
 
 async function clickMailRow(row) {
   const target = findMailRowOpenTarget(row?.element);
   simulateClick(target || row.element);
-  await sleep(1000);
+  await sleepWithMailboxPatrol(1000, { reason: 'opening a matched inbox row' });
 }
 
 function findMailRowOpenTarget(element) {
@@ -678,6 +1281,7 @@ async function waitForCodeInPage(timeoutMs = 4000, intervalMs = 250) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     throwIfStopped();
+    await settleMailDetailInterruptions();
     const code = findCodeInPageText();
     if (code) {
       return code;
@@ -695,13 +1299,13 @@ async function leaveMailDetailView() {
   const backButton = findMailboxBackButton();
   if (backButton) {
     simulateClick(backButton);
-    await sleep(900);
+    await sleepWithMailboxPatrol(900, { reason: 'leaving the mail detail view' });
     return true;
   }
 
   if (window.history && typeof window.history.back === 'function') {
     window.history.back();
-    await sleep(900);
+    await sleepWithMailboxPatrol(900, { reason: 'leaving the mail detail view' });
     return true;
   }
 
@@ -714,15 +1318,19 @@ async function readCodeFromMailRow(row) {
     return code;
   }
 
+  log(`TMailor: Opening matched inbox row (${row?.sender || 'unknown sender'} | ${row?.subject || 'unknown subject'})`, 'info');
   await clickMailRow(row);
-  code = await waitForCodeInPage(5000, 250);
+  await settleMailDetailInterruptions();
+  code = await waitForCodeInPage(8000, 250);
   if (code) {
     return code;
   }
 
+  log('TMailor: Mail detail opened but the verification code did not become visible in time; returning to inbox view.', 'info');
   const leftDetailView = await leaveMailDetailView();
   if (leftDetailView) {
-    code = await waitForCodeInPage(2500, 250);
+    await settleMailDetailInterruptions();
+    code = extractVerificationCode(normalizeText(row?.element?.textContent || ''));
     if (code) {
       return code;
     }
@@ -802,7 +1410,7 @@ async function handlePollEmail(step, payload) {
     }
 
     if (attempt < maxAttempts) {
-      await sleep(intervalMs);
+      await sleepWithMailboxPatrol(intervalMs, { reason: `waiting for the next inbox poll (${attempt + 1}/${maxAttempts})` });
     }
   }
 
@@ -811,16 +1419,25 @@ async function handlePollEmail(step, payload) {
 
 window.__MULTIPAGE_TMAILOR_TEST_HOOKS = {
   assertNoFatalMailboxError,
+  assertNoManualTakeoverBlockers,
   clickMailRow,
+  detectTmailorPageState,
   dismissBlockingOverlay,
+  ensureCloudflareChallengeClearedOrThrow,
+  fetchTmailorEmail,
+  handleMonetizationVideoAd,
   readCodeFromMailRow,
   readCodeFromCurrentDetailPage,
   handlePollEmail,
   waitForCodeInPage,
   extractVerificationCode,
   findMailRowOpenTarget,
+  findMailRows,
   findCodeInPageText,
+  parseMailRow,
+  runMailboxInterruptionSweep,
   waitForCloudflareConfirm,
+  waitForMailboxControls,
 };
 
 })();

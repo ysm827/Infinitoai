@@ -1,6 +1,6 @@
 // background.js — Service Worker: orchestration, state, tab management, message routing
 
-importScripts('shared/email-addresses.js', 'shared/mail-provider-rotation.js', 'shared/tmailor-domains.js', 'shared/tmailor-api.js', 'data/names.js', 'shared/flow-runner.js', 'shared/runtime-errors.js', 'shared/auto-run.js', 'shared/duck-mail-errors.js', 'shared/sidepanel-settings.js', 'shared/tab-reclaim.js');
+importScripts('shared/email-addresses.js', 'shared/mail-provider-rotation.js', 'shared/tmailor-domains.js', 'shared/tmailor-api.js', 'shared/tmailor-errors.js', 'shared/tmailor-mailbox-strategy.js', 'shared/tmailor-verification-profiles.js', 'shared/content-script-queue.js', 'shared/login-verification-codes.js', 'data/names.js', 'shared/flow-runner.js', 'shared/runtime-errors.js', 'shared/auto-run.js', 'shared/auto-run-failure-stats.js', 'shared/duck-mail-errors.js', 'shared/sidepanel-settings.js', 'shared/tab-reclaim.js');
 
 const LOG_PREFIX = '[MultiPage:bg]';
 const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
@@ -10,12 +10,28 @@ const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
 const { runStepSequence } = FlowRunner;
 const { buildMailPollRecoveryPlan, isMessageChannelClosedError, isReceivingEndMissingError, shouldSkipStepResultLog } = RuntimeErrors;
-const { buildAutoRunStatusPayload, shouldContinueAutoRunAfterError, summarizeAutoRunResult } = AutoRun;
+const {
+  buildAutoRunStatusPayload,
+  buildAutoRunFailureRecord,
+  formatAutoRunLabel,
+  shouldContinueAutoRunAfterError,
+  shouldStartNextInfiniteRunAfterManualFlow,
+  summarizeAutoRunResult,
+} = AutoRun;
+const {
+  normalizeAutoRunStats,
+  recordAutoRunFailure,
+} = AutoRunFailureStats;
 const { addDuckMailRetryHint } = DuckMailErrors;
+const { isTmailorApiCaptchaError } = TmailorErrors;
+const { getTmailorApiOnlyPollingMessage, shouldUseTmailorApiMailboxOnly } = TmailorMailboxStrategy;
+const { buildManualTmailorCodeFetchConfig, getTmailorVerificationProfile } = TmailorVerificationProfiles;
+const { getContentScriptQueueTimeout } = ContentScriptQueue;
+const { mergeLoginVerificationCodeExclusions } = LoginVerificationCodes;
 const { DEFAULT_EMAIL_SOURCE, generate33MailAddress, get33MailDomainForProvider, sanitizeEmailSource } = EmailAddresses;
 const { chooseMailProviderForAutoRun, getConfiguredRotatableMailProviders, getNextMailProviderAvailabilityTimestamp, isRotatableMailProvider, pruneMailProviderUsage, recordMailProviderUsage } = MailProviderRotation;
 const { DEFAULT_TMAILOR_DOMAIN_STATE, extractEmailDomain, isAllowedTmailorDomain, mergeTmailorDomainStates, normalizeTmailorDomainState, recordTmailorDomainFailure, recordTmailorDomainSuccess, shouldBlacklistTmailorDomainForError } = TmailorDomains;
-const { fetchAllowedTmailorEmail, pollTmailorVerificationCode } = TmailorApi;
+const { checkTmailorApiConnectivity, fetchAllowedTmailorEmail, pollTmailorVerificationCode } = TmailorApi;
 const { buildReclaimableTabRegistry } = TabReclaim;
 const {
   DEFAULT_AUTO_RUN_COUNT,
@@ -109,6 +125,7 @@ const DEFAULT_STATE = {
   password: null,
   accounts: [], // { email, password, createdAt }
   lastEmailTimestamp: null,
+  lastSignupVerificationCode: '',
   localhostUrl: null,
   flowStartTime: null,
   tabRegistry: {},
@@ -120,13 +137,19 @@ const DEFAULT_STATE = {
   inbucketMailbox: '',
   autoRunCount: DEFAULT_AUTO_RUN_COUNT,
   autoRunInfinite: DEFAULT_AUTO_RUN_INFINITE,
-  autoRunStats: {
+  autoRunStats: normalizeAutoRunStats({
     successfulRuns: 0,
     failedRuns: 0,
-  },
+    failureBuckets: [],
+  }),
   tmailorDomainState: DEFAULT_TMAILOR_DOMAIN_STATE,
   tmailorAccessToken: '',
   tmailorOutcomeRecorded: false,
+  tmailorApiStatus: {
+    ok: false,
+    status: 'idle',
+    message: 'TMailor API not checked yet.',
+  },
   mailProviderUsage: {
     '163': [],
     qq: [],
@@ -204,8 +227,17 @@ async function getPersistentTmailorDomainState() {
 
   const mergedState = mergeTmailorDomainStates(seedState, storedState);
 
+  const localStoredJson = JSON.stringify(localState[TMAILOR_DOMAIN_STATE_KEY] || null);
+  const sessionStoredJson = JSON.stringify(sessionState[TMAILOR_DOMAIN_STATE_KEY] || null);
+  const mergedJson = JSON.stringify(mergedState);
+
   if (localState[TMAILOR_DOMAIN_STATE_KEY] === undefined && sessionState[TMAILOR_DOMAIN_STATE_KEY] !== undefined) {
     await chrome.storage.local.set({ [TMAILOR_DOMAIN_STATE_KEY]: mergedState });
+  } else if (localStoredJson !== mergedJson || sessionStoredJson !== mergedJson) {
+    await Promise.all([
+      chrome.storage.local.set({ [TMAILOR_DOMAIN_STATE_KEY]: mergedState }),
+      chrome.storage.session.set({ [TMAILOR_DOMAIN_STATE_KEY]: mergedState }),
+    ]);
   }
 
   return mergedState;
@@ -269,7 +301,7 @@ async function setMailProviderState(mailProvider) {
 }
 
 async function setEmailState(email) {
-  await setState({ email });
+  await setState({ email, lastSignupVerificationCode: '' });
   broadcastDataUpdate({ email });
 }
 
@@ -278,6 +310,7 @@ async function setTmailorMailboxState(email, accessToken) {
     email,
     tmailorAccessToken: String(accessToken || '').trim(),
     tmailorOutcomeRecorded: false,
+    lastSignupVerificationCode: '',
   });
   broadcastDataUpdate({ email });
 }
@@ -286,6 +319,17 @@ async function setTmailorDomainState(nextState) {
   const normalizedState = await setPersistentTmailorDomainState(nextState);
   broadcastDataUpdate({ tmailorDomainState: normalizedState });
   return normalizedState;
+}
+
+async function setTmailorApiStatus(nextStatus) {
+  const normalizedStatus = {
+    ok: Boolean(nextStatus?.ok),
+    status: typeof nextStatus?.status === 'string' ? nextStatus.status : 'idle',
+    message: typeof nextStatus?.message === 'string' ? nextStatus.message : 'TMailor API not checked yet.',
+  };
+  await setState({ tmailorApiStatus: normalizedStatus });
+  broadcastDataUpdate({ tmailorApiStatus: normalizedStatus });
+  return normalizedStatus;
 }
 
 async function setPasswordState(password) {
@@ -509,12 +553,27 @@ const pendingCommands = new Map(); // source -> { message, resolve, reject, time
 
 function queueCommand(source, message, timeout = 15000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pendingCommands.delete(source);
-      const err = `Content script on ${source} did not respond in ${timeout / 1000}s. Try refreshing the tab and retry.`;
-      console.error(LOG_PREFIX, err);
-      reject(new Error(err));
-    }, timeout);
+    let timer = null;
+    if (timeout > 0) {
+      timer = setTimeout(() => {
+        pendingCommands.delete(source);
+        const err = `Content script on ${source} did not respond in ${timeout / 1000}s. Try refreshing the tab and retry.`;
+        console.error(LOG_PREFIX, err);
+        if (source === 'tmailor-mail') {
+          const messageType = String(message?.type || '').trim();
+          const actionLabel = messageType === 'FETCH_TMAILOR_EMAIL'
+            ? 'mailbox generation'
+            : messageType === 'POLL_EMAIL'
+              ? 'inbox polling'
+              : 'mailbox work';
+          void addLog(
+            `TMailor: Content script did not become ready within ${Math.round(timeout / 1000)}s while waiting for ${actionLabel}. The page may still be loading, blocked by Cloudflare, or stalled in the browser.`,
+            'warn'
+          );
+        }
+        reject(new Error(err));
+      }, timeout);
+    }
     pendingCommands.set(source, { message, resolve, reject, timer });
     console.log(LOG_PREFIX, `Command queued for ${source} (waiting for ready)`);
   });
@@ -525,6 +584,15 @@ function flushCommand(source, tabId) {
   if (pending) {
     clearTimeout(pending.timer);
     pendingCommands.delete(source);
+    if (source === 'tmailor-mail') {
+      const messageType = String(pending.message?.type || '').trim();
+      const actionLabel = messageType === 'FETCH_TMAILOR_EMAIL'
+        ? 'mailbox generation'
+        : messageType === 'POLL_EMAIL'
+          ? 'inbox polling'
+          : 'mailbox work';
+      void addLog(`TMailor: Content script is ready. Dispatching queued command for ${actionLabel}...`, 'info');
+    }
     chrome.tabs.sendMessage(tabId, pending.message).then(pending.resolve).catch(pending.reject);
     console.log(LOG_PREFIX, `Flushed queued command to ${source} (tab ${tabId})`);
   }
@@ -684,10 +752,25 @@ async function reuseOrCreateTab(source, url, options = {}) {
 async function sendToContentScript(source, message) {
   const registry = await getTabRegistry();
   const entry = registry[source];
+  const queueTimeout = getContentScriptQueueTimeout(source, message?.type);
+  const queueWaitHint = queueTimeout > 0
+    ? `${Math.round(queueTimeout / 1000)}s timeout`
+    : 'no timeout while waiting for manual takeover or challenge handling';
 
   if (!entry || !entry.ready) {
     console.log(LOG_PREFIX, `${source} not ready, queuing command`);
-    return queueCommand(source, message);
+    if (source === 'tmailor-mail') {
+      const actionLabel = message?.type === 'FETCH_TMAILOR_EMAIL'
+        ? 'mailbox generation'
+        : message?.type === 'POLL_EMAIL'
+          ? 'inbox polling'
+          : 'mailbox work';
+      await addLog(
+        `TMailor: Waiting for mailbox content script to become ready before ${actionLabel} (${queueWaitHint})...`,
+        'info'
+      );
+    }
+    return queueCommand(source, message, queueTimeout);
   }
 
   // Verify tab is still alive
@@ -695,7 +778,13 @@ async function sendToContentScript(source, message) {
   if (!alive) {
     // Tab was closed — queue the command, it will be sent when tab is reopened
     console.log(LOG_PREFIX, `${source} tab was closed, queuing command`);
-    return queueCommand(source, message);
+    if (source === 'tmailor-mail') {
+      await addLog(
+        `TMailor: Mailbox tab is not alive right now. Waiting for it to reopen before retrying the queued command (${queueWaitHint})...`,
+        'warn'
+      );
+    }
+    return queueCommand(source, message, queueTimeout);
   }
 
   console.log(LOG_PREFIX, `Sending to ${source} (tab ${entry.tabId}):`, message.type);
@@ -724,7 +813,13 @@ async function sendToContentScript(source, message) {
       return await chrome.tabs.sendMessage(entry.tabId, message);
     }
 
-    return queueCommand(source, message);
+    if (source === 'tmailor-mail') {
+      await addLog(
+        `TMailor: Content script disconnected. Waiting for reinjection and ready signal before retrying (${queueWaitHint})...`,
+        'warn'
+      );
+    }
+    return queueCommand(source, message, queueTimeout);
   }
 }
 
@@ -968,7 +1063,7 @@ async function handleMessage(message, sender) {
       clearStopRequest();
       const totalRuns = message.payload?.totalRuns || 1;
       const infiniteMode = sanitizeInfiniteAutoRun(message.payload?.infiniteMode);
-      autoRunLoop(totalRuns, infiniteMode);  // fire-and-forget
+      startAutoRunLoop(totalRuns, infiniteMode);
       return { ok: true };
     }
 
@@ -982,8 +1077,8 @@ async function handleMessage(message, sender) {
           await setEmailState(message.payload.email);
         }
       }
-      resumeAutoRun();  // fire-and-forget
-      return { ok: true };
+      const resumed = await resumeAutoRun();
+      return { ok: true, resumed };
     }
 
     case 'SAVE_SETTING': {
@@ -1059,6 +1154,71 @@ async function handleMessage(message, sender) {
         emailSource: sanitizeEmailSource(state.emailSource),
         mailProvider: state.mailProvider,
       };
+    }
+
+    case 'CHECK_TMAILOR_API_STATUS': {
+      const result = await checkTmailorApiConnectivity({});
+      const status = await setTmailorApiStatus(result);
+      return { ok: true, tmailorApiStatus: status };
+    }
+
+    case 'FETCH_TMAILOR_API_CODE': {
+      const state = await getState();
+      if (!state.tmailorAccessToken) {
+        return { error: 'No TMailor API mailbox is cached yet. Generate or validate a TMailor mailbox first.' };
+      }
+      if (!state.email) {
+        return { error: 'Current mailbox is empty. Save or generate a TMailor email first.' };
+      }
+
+      const fetchConfig = buildManualTmailorCodeFetchConfig({
+        currentStep: state.currentStep,
+        targetEmail: state.email,
+        signupCode: state.lastSignupVerificationCode,
+      });
+
+      await addLog(
+        `Manual TMailor API code fetch: checking ${state.email} via API (step ${fetchConfig.step})...`,
+        'info'
+      );
+
+      try {
+        const result = await pollTmailorVerificationCode({
+          accessToken: state.tmailorAccessToken,
+          ...fetchConfig,
+          onPollStart: async (event) => {
+            await addLog(
+              `Manual TMailor API code fetch: polling ${event.attempt}/${event.maxAttempts}...`,
+              'info'
+            );
+          },
+          onPollAttempt: async (event) => {
+            const candidateLabel = event.candidateFound
+              ? `matched ${event.matchedCount} candidate mail(s)`
+              : 'no matching mail yet';
+            await addLog(
+              `Manual TMailor API code fetch: poll ${event.attempt}/${event.maxAttempts} (${candidateLabel}).`,
+              'info'
+            );
+          },
+          onRetry: async (event) => {
+            const waitLabel = event.waitMs > 0 ? `, retrying in ${formatWaitDuration(event.waitMs)}` : ', retrying now';
+            await addLog(
+              `Manual TMailor API code fetch: ${event.stage} retry ${event.retryAttempt}/${event.maxRequestRetries} failed: ${event.error.message}${waitLabel}.`,
+              'warn'
+            );
+          },
+        });
+
+        await addLog(
+          `Manual TMailor API code fetch: got code ${result.code} for ${state.email}.`,
+          'ok'
+        );
+        return { ok: true, code: result.code, step: fetchConfig.step, email: state.email };
+      } catch (err) {
+        await addLog(`Manual TMailor API code fetch failed: ${err.message}`, 'warn');
+        return { error: err.message };
+      }
     }
 
     case 'STOP_FLOW': {
@@ -1145,14 +1305,20 @@ function notifyStepError(step, error) {
   if (waiter) waiter.reject(new Error(error));
 }
 
-async function setAutoRunStats(successfulRuns, failedRuns) {
-  const nextStats = {
-    successfulRuns: Math.max(0, Number.parseInt(String(successfulRuns ?? 0), 10) || 0),
-    failedRuns: Math.max(0, Number.parseInt(String(failedRuns ?? 0), 10) || 0),
-  };
+async function setAutoRunStats(successfulRunsOrStats, failedRuns) {
+  const nextStats = typeof successfulRunsOrStats === 'object' && successfulRunsOrStats !== null
+    ? normalizeAutoRunStats(successfulRunsOrStats)
+    : normalizeAutoRunStats({
+      successfulRuns: successfulRunsOrStats,
+      failedRuns,
+      failureBuckets: autoRunStatsState.failureBuckets,
+    });
+
   autoRunSuccessfulRuns = nextStats.successfulRuns;
   autoRunFailedRuns = nextStats.failedRuns;
+  autoRunStatsState = nextStats;
   await setState({ autoRunStats: nextStats });
+  broadcastDataUpdate({ autoRunStats: nextStats });
   return nextStats;
 }
 
@@ -1166,6 +1332,7 @@ function sendAutoRunStatus(phase, overrides = {}) {
       infiniteMode: autoRunInfinite,
       successfulRuns: autoRunSuccessfulRuns,
       failedRuns: autoRunFailedRuns,
+      failureBuckets: autoRunStatsState.failureBuckets,
       ...overrides,
     }),
   }).catch(() => {});
@@ -1175,6 +1342,17 @@ async function handOffPausedAutoRunToManual(step) {
   if (!autoRunActive || !resumeWaiter) {
     return false;
   }
+
+  manualHandoffRunContext = {
+    currentRun: autoRunCurrentRun,
+    totalRuns: autoRunTotalRuns,
+    infiniteMode: autoRunInfinite,
+    runLabel: formatAutoRunLabel({
+      currentRun: autoRunCurrentRun,
+      totalRuns: autoRunTotalRuns,
+      infiniteMode: autoRunInfinite,
+    }),
+  };
 
   const waiter = resumeWaiter;
   resumeWaiter = null;
@@ -1200,17 +1378,61 @@ async function runManualFlow(startStep) {
   }
 
   manualRunActive = true;
+  let handedOffPausedAutoRun = false;
+  let inheritedRunContext = null;
 
   try {
-    await handOffPausedAutoRunToManual(startStep);
+    handedOffPausedAutoRun = await handOffPausedAutoRunToManual(startStep);
+    inheritedRunContext = manualHandoffRunContext;
     await addLog(`Manual continuation: step ${startStep} -> 9`, 'info');
     await runStepSequence({
       startStep,
       executeStepAndWait,
     });
     await addLog('Manual continuation completed through step 9', 'ok');
+    if (handedOffPausedAutoRun && inheritedRunContext) {
+      await setAutoRunStats(autoRunSuccessfulRuns + 1, autoRunFailedRuns);
+      sendAutoRunStatus('stopped', {
+        currentRun: inheritedRunContext.currentRun,
+        totalRuns: inheritedRunContext.totalRuns,
+        infiniteMode: inheritedRunContext.infiniteMode,
+      });
+    }
+  } catch (err) {
+    if (handedOffPausedAutoRun && inheritedRunContext && !isStopError(err) && !isAutoRunHandoffError(err)) {
+      await recordVisibleAutoRunFailure(err.message, inheritedRunContext);
+      sendAutoRunStatus('stopped', {
+        currentRun: inheritedRunContext.currentRun,
+        totalRuns: inheritedRunContext.totalRuns,
+        infiniteMode: inheritedRunContext.infiniteMode,
+      });
+    }
+    throw err;
   } finally {
     manualRunActive = false;
+    manualHandoffRunContext = null;
+
+    const state = await getState();
+    if (shouldStartNextInfiniteRunAfterManualFlow({
+      autoRunInfinite: state.autoRunInfinite,
+      stopRequested,
+    })) {
+      if (handedOffPausedAutoRun) {
+        await waitForAutoRunTaskToSettle();
+      }
+
+      await addLog('Infinite mode is enabled. Starting the next run automatically...', 'info');
+      startAutoRunLoop(
+        sanitizeAutoRunCount(state.autoRunCount),
+        true,
+        handedOffPausedAutoRun && inheritedRunContext
+          ? {
+              preserveStats: true,
+              startingRun: inheritedRunContext.currentRun + 1,
+            }
+          : {}
+      );
+    }
   }
 }
 
@@ -1460,13 +1682,19 @@ async function fetchTmailorEmail(options = {}) {
       await addLog(`TMailor API: Mailbox ready ${result.email} (token saved for API inbox polling).`, 'ok');
       return result.email;
     } catch (err) {
-      await addLog(`TMailor API: New mailbox request failed: ${err.message}`, 'warn');
-      await addLog('TMailor: Falling back to the mailbox page flow for address generation.', 'warn');
+      if (isTmailorApiCaptchaError(err)) {
+        await addLog(`TMailor API: New mailbox request failed: ${err.message}`, 'warn');
+        await addLog('TMailor API reported a captcha/block. Opening the mailbox page to inspect the challenge and auto-attempt it before manual takeover.', 'warn');
+      } else {
+        await addLog(`TMailor API: New mailbox request failed: ${err.message}`, 'warn');
+        await addLog('TMailor: Falling back to the mailbox page flow for address generation.', 'warn');
+      }
     }
   }
 
   await addLog(`TMailor: Opening mailbox page (${generateNew ? 'generate new' : 'reuse current'})...`);
   await reuseOrCreateTab('tmailor-mail', 'https://tmailor.com/');
+  await addLog('TMailor: Mailbox page opened. Waiting for the content script handshake before starting mailbox automation...', 'info');
 
   const result = await sendToContentScript('tmailor-mail', {
     type: 'FETCH_TMAILOR_EMAIL',
@@ -1511,25 +1739,89 @@ let autoRunTotalRuns = 1;
 let autoRunInfinite = false;
 let autoRunSuccessfulRuns = 0;
 let autoRunFailedRuns = 0;
+let autoRunStatsState = normalizeAutoRunStats(DEFAULT_STATE.autoRunStats);
 let autoRunLastRotatedMailProvider = null;
+let autoRunTask = null;
+let manualHandoffRunContext = null;
+
+async function recordVisibleAutoRunFailure(errorMessage, overrides = {}) {
+  const failureRecord = buildAutoRunFailureRecord({
+    errorMessage,
+    currentRun: overrides.currentRun ?? autoRunCurrentRun,
+    totalRuns: overrides.totalRuns ?? autoRunTotalRuns,
+    infiniteMode: overrides.infiniteMode ?? autoRunInfinite,
+    step: overrides.step ?? 0,
+    timestamp: overrides.timestamp ?? Date.now(),
+  });
+
+  await setAutoRunStats(recordAutoRunFailure(autoRunStatsState, failureRecord));
+  return failureRecord;
+}
+
+function startAutoRunLoop(totalRuns, infiniteMode = false, options = {}) {
+  if (autoRunTask) {
+    return autoRunTask;
+  }
+
+  const task = autoRunLoop(totalRuns, infiniteMode, options)
+    .catch(async (err) => {
+      console.error(LOG_PREFIX, 'Auto run crashed unexpectedly:', err);
+      if (shouldContinueAutoRunAfterError(err)) {
+        const failureRecord = await recordVisibleAutoRunFailure(err.message);
+        sendAutoRunStatus('stopped', {
+          currentRun: autoRunCurrentRun,
+          summaryMessage: failureRecord.logMessage,
+        });
+      }
+      await addLog(`Auto run crashed unexpectedly: ${err.message}`, 'error');
+    })
+    .finally(() => {
+      if (autoRunTask === task) {
+        autoRunTask = null;
+      }
+    });
+
+  autoRunTask = task;
+  return task;
+}
+
+async function waitForAutoRunTaskToSettle() {
+  if (!autoRunTask) {
+    return;
+  }
+
+  try {
+    await autoRunTask;
+  } catch {}
+}
 
 // Outer loop: runs the full flow N times
-async function autoRunLoop(totalRuns, infiniteMode = false) {
+async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
   if (autoRunActive) {
     await addLog('Auto run already in progress', 'warn');
     return;
   }
+
+  const preserveStats = Boolean(options?.preserveStats);
+  const startingRun = Math.max(1, Number.parseInt(String(options?.startingRun ?? 1), 10) || 1);
 
   clearStopRequest();
   autoRunActive = true;
   autoRunInfinite = Boolean(infiniteMode);
   autoRunTotalRuns = autoRunInfinite ? Number.POSITIVE_INFINITY : totalRuns;
   autoRunLastRotatedMailProvider = null;
-  await setAutoRunStats(0, 0);
+  manualHandoffRunContext = null;
+  if (!preserveStats) {
+    await setAutoRunStats({
+      successfulRuns: 0,
+      failedRuns: 0,
+      failureBuckets: [],
+    });
+  }
   await setState({ autoRunning: true });
   let handedOffToManual = false;
 
-  for (let run = 1; autoRunInfinite || run <= totalRuns; run++) {
+  for (let run = startingRun; autoRunInfinite || run <= totalRuns; run++) {
     autoRunCurrentRun = run;
 
     // Reset everything at the start of each run (keep VPS/mail settings)
@@ -1629,8 +1921,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
 
         const resumedState = await getState();
         if (getCurrentEmailSource(resumedState) !== '33mail' && !resumedState.email) {
-          await addLog('Cannot resume: no email address.', 'error');
-          break;
+          throw new Error('Cannot resume: no email address.');
         }
       }
 
@@ -1648,7 +1939,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
       });
 
       await addLog(`=== Run ${runTargetText} COMPLETE! ===`, 'ok');
-      await setAutoRunStats(autoRunSuccessfulRuns + 1, autoRunFailedRuns);
+        await setAutoRunStats(autoRunSuccessfulRuns + 1, autoRunFailedRuns);
 
     } catch (err) {
       if (isAutoRunHandoffError(err)) {
@@ -1659,8 +1950,12 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
         await addLog(`Run ${runTargetText} stopped by user`, 'warn');
         break;
       } else {
-        await setAutoRunStats(autoRunSuccessfulRuns, autoRunFailedRuns + 1);
-        await addLog(`Run ${runTargetText} failed: ${err.message}`, 'error');
+        const failureRecord = await recordVisibleAutoRunFailure(err.message, {
+          currentRun: run,
+          totalRuns: autoRunTotalRuns,
+          infiniteMode: autoRunInfinite,
+        });
+        await addLog(failureRecord.logMessage, 'error');
         if (autoRunInfinite || run < totalRuns) {
           if (/step 5 failed: .*unsupported_email|step 5 failed: auth fatal error page detected after profile submit\./i.test(err.message || '')) {
             await addLog(`Run ${runTargetText}: TMailor domain was blocked during step 5. Marked as failed and moving to the next run.`, 'warn');
@@ -1694,6 +1989,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
       infiniteMode: autoRunInfinite,
       successfulRuns: autoRunSuccessfulRuns,
       failedRuns: autoRunFailedRuns,
+      failureBuckets: autoRunStatsState.failureBuckets,
       summaryMessage: summary.message,
       summaryToast: summary.toastMessage,
     }),
@@ -1717,12 +2013,15 @@ async function resumeAutoRun() {
   const state = await getState();
   if (getCurrentEmailSource(state) !== '33mail' && !state.email) {
     await addLog('Cannot resume: no email address. Paste email in Side Panel first.', 'error');
-    return;
+    return false;
   }
   if (resumeWaiter) {
     resumeWaiter.resolve();
     resumeWaiter = null;
+    return true;
   }
+  await addLog('Auto run resume was requested, but no paused auto-run waiter is active. Falling back to step 3 is allowed.', 'warn');
+  return false;
 }
 
 // ============================================================
@@ -1907,6 +2206,10 @@ async function reviveMailTab(mail) {
 
 async function pollVerificationCodeFromMail(step, mail, payload) {
   const state = await getState();
+  const useTmailorApiMailboxOnly = shouldUseTmailorApiMailboxOnly({
+    mailSource: mail.source,
+    accessToken: state.tmailorAccessToken,
+  });
 
   if (mail.source === 'tmailor-mail' && state.tmailorAccessToken) {
     try {
@@ -1921,11 +2224,37 @@ async function pollVerificationCodeFromMail(step, mail, payload) {
         targetEmail: payload?.targetEmail,
         maxAttempts: payload?.maxAttempts,
         intervalMs: payload?.intervalMs,
+        onPollStart: async (event) => {
+          await addLog(
+            `Step ${step}: TMailor API 开始轮询 ${event.attempt}/${event.maxAttempts}...`,
+            'info'
+          );
+        },
+        onPollAttempt: async (event) => {
+          const candidateLabel = event.candidateFound
+            ? `发现 ${event.matchedCount} 封候选邮件`
+            : '暂未发现匹配邮件';
+          await addLog(
+            `Step ${step}: TMailor API 轮询 ${event.attempt}/${event.maxAttempts}（${candidateLabel}）`,
+            'info'
+          );
+        },
+        onRetry: async (event) => {
+          const waitLabel = event.waitMs > 0 ? `，${formatWaitDuration(event.waitMs)}后重试` : '，立即重试';
+          await addLog(
+            `Step ${step}: TMailor API ${event.stage} 暂时失败（轮询 ${event.pollAttempt}/${event.maxPollAttempts}，重试 ${event.retryAttempt}/${event.maxRequestRetries}）：${event.error.message}${waitLabel}`,
+            'warn'
+          );
+        },
       });
       await addLog(`Step ${step}: TMailor API returned verification code ${apiResult.code}.`, 'ok');
       return apiResult;
     } catch (err) {
       await addLog(`Step ${step}: TMailor API inbox polling failed: ${err.message}`, 'warn');
+      if (useTmailorApiMailboxOnly) {
+        await addLog(`Step ${step}: ${getTmailorApiOnlyPollingMessage(state.email)}`, 'warn');
+        throw err;
+      }
       await addLog(`Step ${step}: Falling back to the TMailor page DOM flow for inbox polling.`, 'warn');
     }
   }
@@ -2040,35 +2369,71 @@ async function executeVerificationMailStep(step, state, options) {
     filterAfterTimestamp = 0,
     senderFilters,
     subjectFilters,
-    clickResendFirst = true,
+    resendAfterAttempts = 3,
     persistLastEmailTimestamp = false,
   } = options;
 
   const mail = getMailConfig(state);
   if (mail.error) throw new Error(mail.error);
-  await addLog(`Step ${step}: Opening ${mail.label}...`);
-  await ensureMailTabReady(mail);
+  const useTmailorApiMailboxOnly = shouldUseTmailorApiMailboxOnly({
+    mailSource: mail.source,
+    accessToken: state.tmailorAccessToken,
+  });
+  if (useTmailorApiMailboxOnly) {
+    await addLog(`Step ${step}: ${getTmailorApiOnlyPollingMessage(state.email)}`, 'info');
+  } else {
+    await addLog(`Step ${step}: Opening ${mail.label}...`);
+    await ensureMailTabReady(mail);
+  }
 
   const rejectedCodes = new Set();
   let currentFilterAfterTimestamp = filterAfterTimestamp;
   const maxInboxChecks = 4;
+  let resendTriggered = false;
 
   for (let inboxCheck = 1; inboxCheck <= maxInboxChecks; inboxCheck++) {
-    if (inboxCheck === 1 && clickResendFirst) {
-      await clickResendOnSignupPage(step);
-    } else if (inboxCheck > 1) {
-      await addLog(`Step ${step}: Verification code was rejected. Refreshing inbox without resending...`, 'warn');
+    if (inboxCheck > 1) {
+      await addLog(`Step ${step}: Still checking the inbox for a fresh verification email...`, 'info');
     }
 
-    const result = await pollVerificationCodeFromMail(step, mail, {
-      filterAfterTimestamp: currentFilterAfterTimestamp,
-      senderFilters,
-      subjectFilters,
-      targetEmail: state.email,
-      excludeCodes: [...rejectedCodes],
-      maxAttempts: 20,
-      intervalMs: 3000,
-    });
+    let result = null;
+
+    try {
+      result = await pollVerificationCodeFromMail(step, mail, {
+        filterAfterTimestamp: currentFilterAfterTimestamp,
+        senderFilters,
+        subjectFilters,
+        targetEmail: state.email,
+        excludeCodes: step === 7
+          ? mergeLoginVerificationCodeExclusions({
+            signupCode: state.lastSignupVerificationCode,
+            rejectedCodes: [...rejectedCodes],
+          })
+          : [...rejectedCodes],
+        maxAttempts: 20,
+        intervalMs: 3000,
+      });
+    } catch (err) {
+      const errorMessage = err?.message || '';
+      const noMailFound = /No matching verification email found/i.test(errorMessage);
+
+      if (!noMailFound) {
+        throw err;
+      }
+
+      if (!resendTriggered && inboxCheck >= resendAfterAttempts) {
+        await addLog(`Step ${step}: No new email after ${inboxCheck} inbox checks. Triggering resend once, then checking again...`, 'warn');
+        await clickResendOnSignupPage(step);
+        resendTriggered = true;
+        continue;
+      }
+
+      if (inboxCheck >= maxInboxChecks) {
+        throw err;
+      }
+
+      continue;
+    }
 
     if (result.emailTimestamp) {
       currentFilterAfterTimestamp = Math.max(currentFilterAfterTimestamp || 0, result.emailTimestamp);
@@ -2085,6 +2450,10 @@ async function executeVerificationMailStep(step, state, options) {
       continue;
     }
 
+    if (step === 4) {
+      await setState({ lastSignupVerificationCode: result.code });
+    }
+
     return;
   }
 
@@ -2094,9 +2463,8 @@ async function executeVerificationMailStep(step, state, options) {
 async function executeStep4(state) {
   await executeVerificationMailStep(4, state, {
     filterAfterTimestamp: state.flowStartTime || 0,
-    senderFilters: ['openai', 'noreply', 'verify', 'auth', 'duckduckgo', 'forward'],
-    subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm'],
-    clickResendFirst: true,
+    ...getTmailorVerificationProfile(4),
+    resendAfterAttempts: 3,
     persistLastEmailTimestamp: true,
   });
 }
@@ -2151,9 +2519,8 @@ async function executeStep6(state) {
 async function executeStep7(state) {
   await executeVerificationMailStep(7, state, {
     filterAfterTimestamp: state.lastEmailTimestamp || state.flowStartTime || 0,
-    senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt', 'duckduckgo', 'forward'],
-    subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm', 'login'],
-    clickResendFirst: true,
+    ...getTmailorVerificationProfile(7),
+    resendAfterAttempts: 3,
     persistLastEmailTimestamp: false,
   });
 }

@@ -339,6 +339,14 @@ header {
   flex: 1;
 }
 
+.run-stats-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
 .run-stat-pill {
   display: inline-flex;
   align-items: center;
@@ -364,6 +372,121 @@ header {
   border-color: rgba(220, 38, 38, 0.2);
   background: var(--red-soft);
   color: var(--red);
+}
+
+.run-failure-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.run-failure-empty {
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: var(--bg-base);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.run-failure-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-base);
+  overflow: hidden;
+}
+
+.run-failure-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.run-failure-summary::-webkit-details-marker {
+  display: none;
+}
+
+.run-failure-summary::after {
+  content: '+';
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.run-failure-card[open] .run-failure-summary::after {
+  content: '-';
+}
+
+.run-failure-card {
+  position: relative;
+}
+
+.run-failure-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 12px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.run-failure-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.run-failure-step,
+.run-failure-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.run-failure-step {
+  color: var(--text-secondary);
+}
+
+.run-failure-count {
+  color: var(--red);
+}
+
+.run-failure-reason {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.run-failure-meta,
+.run-failure-logs-label {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.run-failure-logs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.run-failure-log {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-word;
 }
 
 .mono {
@@ -510,6 +633,50 @@ header {
 .tmailor-mode-control {
   display: flex;
   width: 100%;
+}
+
+.tmailor-api-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+}
+
+.tmailor-api-status {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-height: 32px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tmailor-api-status-ok {
+  border-color: color-mix(in srgb, var(--green) 35%, var(--border));
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.tmailor-api-status-error {
+  border-color: color-mix(in srgb, var(--red) 35%, var(--border));
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.tmailor-api-status-idle {
+  color: var(--text-secondary);
+}
+
+.tmailor-api-code-btn {
+  flex: 0 0 auto;
+  width: 34px;
+  min-width: 34px;
+  height: 32px;
 }
 
 .data-select-inline {
@@ -812,6 +979,10 @@ header {
   margin-bottom: 6px;
 }
 
+.log-panel {
+  position: relative;
+}
+
 #log-area {
   background: var(--bg-surface);
   border: 1px solid var(--border);
@@ -830,6 +1001,49 @@ header {
 #log-area::-webkit-scrollbar-track { background: transparent; }
 #log-area::-webkit-scrollbar-thumb { background: var(--bg-elevated); border-radius: 4px; }
 #log-area::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+.log-scroll-bottom {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(6px);
+  transition: opacity var(--transition), transform var(--transition), color var(--transition), border-color var(--transition), background var(--transition);
+}
+
+.log-scroll-bottom svg {
+  width: 16px;
+  height: 16px;
+}
+
+.log-scroll-bottom.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.log-scroll-bottom:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: color-mix(in srgb, var(--bg-base) 88%, var(--blue-soft));
+}
+
+[data-theme="dark"] .log-scroll-bottom {
+  background: rgba(24, 26, 33, 0.94);
+}
 
 .log-line { padding: 2.5px 0; }
 .log-line + .log-line { border-top: 1px solid var(--border-subtle); }

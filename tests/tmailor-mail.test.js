@@ -155,6 +155,165 @@ test('tmailor opens the mail detail when the list preview masks the verification
   assert.equal(context.__state.clicked, 1);
 });
 
+test('tmailor clears a blocking interstitial ad while waiting for the code on the mail detail page', async () => {
+  const context = createContext();
+  const state = context.__state;
+  state.detailCodeVisible = false;
+  state.interstitialVisible = true;
+
+  const adBox = {
+    id: 'ad_position_box',
+    getBoundingClientRect() {
+      return { width: 480, height: 320 };
+    },
+  };
+  const dismissClose = {
+    tagName: 'DIV',
+    textContent: 'Close',
+    getBoundingClientRect() {
+      return { width: 80, height: 30 };
+    },
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === '#ad_position_box') {
+      return state.interstitialVisible ? adBox : null;
+    }
+    if (selector === '#dismiss-button-element > div') {
+      return state.interstitialVisible ? dismissClose : null;
+    }
+    if (selector === 'h1') {
+      return state.detailCodeVisible ? { textContent: 'OpenAI verification code is 654321' } : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return state.interstitialVisible ? [dismissClose] : [];
+    }
+    return [];
+  };
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === dismissClose) {
+      state.interstitialVisible = false;
+      state.detailCodeVisible = true;
+    }
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.waitForCodeInPage, 'expected tmailor test hooks to expose waitForCodeInPage');
+
+  const code = await hooks.waitForCodeInPage(1200, 50);
+
+  assert.equal(code, '654321');
+  assert.equal(state.lastClicked, dismissClose);
+});
+
+test('tmailor clears a monetization video ad after opening a mail row before reading the detail code', async () => {
+  const context = createContext();
+  const state = context.__state;
+  state.dialogVisible = false;
+  state.adVisible = false;
+  state.closeVisible = false;
+  state.detailOpened = false;
+
+  const playButton = {
+    tagName: 'BUTTON',
+    textContent: 'View a short ad',
+    getBoundingClientRect() {
+      return { width: 120, height: 36 };
+    },
+  };
+  const monetizationDialog = {
+    getBoundingClientRect() {
+      return { width: 480, height: 320 };
+    },
+  };
+  const adCloseButton = {
+    tagName: 'DIV',
+    textContent: 'Close',
+    getBoundingClientRect() {
+      return { width: 80, height: 30 };
+    },
+  };
+  const rowTarget = {
+    getBoundingClientRect() {
+      return { width: 120, height: 24 };
+    },
+  };
+
+  const row = {
+    combinedText: 'OpenAI verification code is ******',
+    element: rowTarget,
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog') {
+      return state.dialogVisible ? monetizationDialog : null;
+    }
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog > div > div.fc-list-container > button') {
+      return state.dialogVisible ? playButton : null;
+    }
+    if (selector === '#dismiss-button-element > div') {
+      return state.adVisible && state.closeVisible ? adCloseButton : null;
+    }
+    if (selector === 'h1') {
+      return state.detailOpened && !state.dialogVisible && !state.adVisible
+        ? { textContent: 'OpenAI verification code is 112233' }
+        : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      if (state.dialogVisible) return [playButton];
+      if (state.adVisible && state.closeVisible) return [adCloseButton];
+      return [];
+    }
+    return [];
+  };
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === rowTarget) {
+      state.detailOpened = true;
+      state.dialogVisible = true;
+    }
+    if (target === playButton) {
+      state.dialogVisible = false;
+      state.adVisible = true;
+    }
+    if (target === adCloseButton) {
+      state.adVisible = false;
+      state.closeVisible = false;
+    }
+  };
+  context.sleep = async () => {
+    state.sleepCalls += 1;
+    if (state.adVisible && state.sleepCalls >= 2) {
+      state.closeVisible = true;
+    }
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.readCodeFromMailRow, 'expected tmailor test hooks to expose readCodeFromMailRow');
+
+  const code = await hooks.readCodeFromMailRow(row);
+
+  assert.equal(code, '112233');
+  assert.equal(state.clicked, 3);
+  assert.equal(state.lastClicked, adCloseButton);
+  assert.ok(
+    state.logs.some((entry) => /Monetization video ad overlay detected, clicking Play/i.test(entry.message)),
+    'expected a detail-page monetization play log'
+  );
+});
+
 test('tmailor prefers the nested email detail link when opening a mailbox row', async () => {
   const context = createContext();
   loadTmailorScript(context);
@@ -186,6 +345,78 @@ test('tmailor prefers the nested email detail link when opening a mailbox row', 
 
   assert.equal(context.__state.clicked, 1);
   assert.equal(context.__state.lastClicked, detailLink);
+});
+
+test('tmailor preserves sender and subject lines when parsing a multiline inbox row', () => {
+  const context = createContext();
+  loadTmailorScript(context);
+
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.parseMailRow, 'expected tmailor test hooks to expose parseMailRow');
+
+  const rowElement = {
+    textContent: 'OpenAI\nYour ChatGPT code is ******\n1 minute ago',
+    getAttribute() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 240, height: 44 };
+    },
+  };
+
+  const row = hooks.parseMailRow(rowElement, 0);
+
+  assert.equal(row.sender, 'OpenAI');
+  assert.equal(row.subject, 'Your ChatGPT code is ******');
+});
+
+test('tmailor ignores an outer wrapper when it only contains a real inbox row descendant', () => {
+  const context = createContext();
+  loadTmailorScript(context);
+
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.findMailRows, 'expected tmailor test hooks to expose findMailRows');
+
+  const actualRow = {
+    tagName: 'TR',
+    textContent: 'OpenAI\nYour ChatGPT code is ******\nJust now',
+    getAttribute(name) {
+      if (name === 'data-mail-id') return 'mail-row-1';
+      return null;
+    },
+    contains() {
+      return false;
+    },
+    getBoundingClientRect() {
+      return { width: 260, height: 48 };
+    },
+  };
+
+  const wrapper = {
+    tagName: 'DIV',
+    textContent: 'OpenAI\nYour ChatGPT code is ******\nJust now',
+    getAttribute(name) {
+      if (name === 'data-id') return 'wrapper-1';
+      return null;
+    },
+    contains(node) {
+      return node === actualRow;
+    },
+    getBoundingClientRect() {
+      return { width: 280, height: 120 };
+    },
+  };
+
+  context.document.querySelectorAll = (selector) => {
+    if (selector === '[data-id]') return [wrapper];
+    if (selector === '[data-mail-id]') return [actualRow];
+    return [];
+  };
+
+  const rows = hooks.findMailRows();
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0], actualRow);
 });
 
 test('tmailor extracts the verification code from stable detail selectors before falling back to body text', () => {
@@ -243,6 +474,49 @@ test('tmailor can return the code directly when the mailbox is already on the em
   assert.equal(result.code, '344928');
   assert.equal(result.emailTimestamp, 0);
   assert.equal(result.mailId, 'https://tmailor.com/inbox?emailid=7409508e-a0c4-4c26-8e80-41f92d283225');
+});
+
+test('tmailor keeps waiting when the mail detail opens successfully but the verification code renders slowly', async () => {
+  const context = createContext();
+  const state = context.__state;
+  state.bodyText = 'OpenAI verification code is ******';
+  let now = 0;
+  context.Date = class extends Date {
+    static now() {
+      return now;
+    }
+  };
+
+  context.document.querySelector = () => null;
+  context.sleep = async () => {
+    state.sleepCalls += 1;
+    now += 250;
+    if (state.sleepCalls >= 23) {
+      state.bodyText = 'OpenAI verification code is 778899';
+    }
+  };
+
+  loadTmailorScript(context);
+
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.readCodeFromMailRow, 'expected tmailor test hooks to expose readCodeFromMailRow');
+
+  const row = {
+    combinedText: 'OpenAI verification code is ******',
+    element: {
+      getAttribute() {
+        return null;
+      },
+      getBoundingClientRect() {
+        return { width: 120, height: 24 };
+      },
+      textContent: 'OpenAI verification code is ******',
+    },
+  };
+
+  const code = await hooks.readCodeFromMailRow(row);
+
+  assert.equal(code, '778899');
 });
 
 test('tmailor can open an already visible matching inbox row on the first attempt instead of waiting for refresh-only fallback', async () => {
@@ -352,6 +626,242 @@ test('tmailor waits for Cloudflare confirm when the verification page appears', 
   assert.equal(handled, true);
   assert.equal(context.__state.clicked, 1);
   assert.equal(context.__state.lastClicked?.id, 'btnNewEmailForm');
+});
+
+test('tmailor detects the idle mailbox state before a new email is generated', () => {
+  const context = createContext();
+  const currentEmailInput = {
+    tagName: 'INPUT',
+    value: '',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'aria-label') {
+        return 'Your Temp Mail Address';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 420, top: 420, width: 520, height: 64 };
+    },
+  };
+  const newEmailButton = {
+    tagName: 'BUTTON',
+    id: 'btnNewEmail',
+    textContent: 'New Email',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'title') {
+        return 'Create a new email address';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 470, top: 550, width: 150, height: 56 };
+    },
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === 'input[name="currentEmailAddress"]') {
+      return currentEmailInput;
+    }
+    if (selector === '#btnNewEmail') {
+      return newEmailButton;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [newEmailButton];
+    }
+    return [];
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.detectTmailorPageState, 'expected tmailor to expose detectTmailorPageState');
+
+  const state = hooks.detectTmailorPageState();
+
+  assert.equal(state.kind, 'mailbox_idle');
+});
+
+test('tmailor detects the ready mailbox state when an email and refresh button are visible', () => {
+  const context = createContext();
+  const currentEmailInput = {
+    tagName: 'INPUT',
+    value: 'ngzwcnvc@tiksofi.uk',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'aria-label') {
+        return 'Your Temp Mail Address';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 420, top: 420, width: 520, height: 64 };
+    },
+  };
+  const newEmailButton = {
+    tagName: 'BUTTON',
+    id: 'btnNewEmail',
+    textContent: 'New Email',
+    disabled: false,
+    getBoundingClientRect() {
+      return { left: 470, top: 550, width: 150, height: 56 };
+    },
+  };
+  const refreshButton = {
+    tagName: 'BUTTON',
+    id: 'refresh-inboxs',
+    textContent: 'Refresh',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'title' || name === 'aria-label') {
+        return 'Refresh';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 930, top: 830, width: 82, height: 24 };
+    },
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === 'input[name="currentEmailAddress"]') {
+      return currentEmailInput;
+    }
+    if (selector === '#btnNewEmail') {
+      return newEmailButton;
+    }
+    if (selector === '#refresh-inboxs') {
+      return refreshButton;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [newEmailButton, refreshButton];
+    }
+    return [];
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.detectTmailorPageState, 'expected tmailor to expose detectTmailorPageState');
+
+  const state = hooks.detectTmailorPageState();
+
+  assert.equal(state.kind, 'mailbox_ready');
+  assert.equal(state.email, 'ngzwcnvc@tiksofi.uk');
+});
+
+test('tmailor detects the in-page turnstile challenge state when Cloudflare confirm is embedded in the mailbox view', () => {
+  const context = createContext();
+  context.document.body.innerText = 'Create New Email Please verify that you are not a robot. Confirm Inbox Refresh';
+  const turnstileContainer = {
+    tagName: 'DIV',
+    className: 'cf-turnstile h-[80px] flex items-center justify-center',
+    getBoundingClientRect() {
+      return { left: 560, top: 460, width: 300, height: 80 };
+    },
+  };
+  const confirmButton = {
+    tagName: 'BUTTON',
+    id: 'btnNewEmailForm',
+    textContent: 'Confirm',
+    disabled: true,
+    getAttribute(name) {
+      if (name === 'title') {
+        return 'Create a new email address';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 650, top: 550, width: 123, height: 42 };
+    },
+  };
+  const currentEmailInput = {
+    tagName: 'INPUT',
+    value: 'We detected that you are performing the operation too fast, please confirm you are not a robot.',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'aria-label') {
+        return 'Your Temp Mail Address';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 0, height: 0 };
+    },
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === '.cf-turnstile' || selector.includes('.cf-turnstile') || selector.includes('cf-turnstile-response')) {
+      return turnstileContainer;
+    }
+    if (selector === '#btnNewEmailForm') {
+      return confirmButton;
+    }
+    if (selector === 'input[name="currentEmailAddress"]') {
+      return currentEmailInput;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [confirmButton];
+    }
+    return [];
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.detectTmailorPageState, 'expected tmailor to expose detectTmailorPageState');
+
+  const state = hooks.detectTmailorPageState();
+
+  assert.equal(state.kind, 'cloudflare_turnstile');
+});
+
+test('tmailor detects the full-page Cloudflare waiting room separately from the in-page turnstile flow', () => {
+  const context = createContext();
+  context.document.body.innerText = 'tmailor.com 正在进行安全验证 本网站使用安全服务防护恶意自动程序。';
+  const wrapper = {
+    tagName: 'DIV',
+    id: '',
+    className: 'main-wrapper lang-zh-cn',
+    getAttribute(name) {
+      if (name === 'role') {
+        return 'main';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 1200, height: 900 };
+    },
+  };
+  const responseInput = {
+    tagName: 'INPUT',
+    id: 'cf-chl-widget-123_response',
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 0, height: 0 };
+    },
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === '.main-wrapper[role="main"]') {
+      return wrapper;
+    }
+    if (selector.includes('input[name="cf-turnstile-response"]')) {
+      return responseInput;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = () => [];
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.detectTmailorPageState, 'expected tmailor to expose detectTmailorPageState');
+
+  const state = hooks.detectTmailorPageState();
+
+  assert.equal(state.kind, 'cloudflare_full_page');
 });
 
 test('tmailor does not trust an enabled Confirm button while the Cloudflare challenge is still visible', async () => {
@@ -466,7 +976,7 @@ test('tmailor waits for the challenge checkbox before clicking Confirm', async (
 
   assert.equal(handled, true);
   assert.equal(context.__state.runtimeMessages?.[0]?.type, 'DEBUGGER_CLICK_AT');
-  assert.equal(context.__state.runtimeMessages?.[0]?.payload?.rect?.centerX, 260);
+  assert.equal(context.__state.runtimeMessages?.[0]?.payload?.rect?.centerX, 153.6);
   assert.equal(context.__state.runtimeMessages?.[0]?.payload?.rect?.centerY, 280);
   assert.equal(context.__state.clicked, 1);
   assert.equal(context.__state.lastClicked?.id, 'btnNewEmailForm');
@@ -479,9 +989,280 @@ test('tmailor waits for the challenge checkbox before clicking Confirm', async (
     'expected a checkbox click log'
   );
   assert.ok(
+    context.__state.logs.some((entry) => /checkbox click dispatched\. Waiting for the challenge to report success/i.test(entry.message)),
+    'expected a post-checkbox wait log'
+  );
+  assert.ok(
     context.__state.logs.some((entry) => /clicking Confirm/i.test(entry.message)),
     'expected a confirm click log'
   );
+});
+
+test('tmailor can click a Cloudflare turnstile container when the iframe is hidden inside a closed shadow root', async () => {
+  const context = createContext();
+  let challengeVisible = true;
+
+  const turnstileContainer = {
+    tagName: 'DIV',
+    className: 'cf-turnstile',
+    getBoundingClientRect() {
+      return { left: 80, top: 140, width: 300, height: 80 };
+    },
+  };
+
+  const confirmButton = {
+    id: 'btnNewEmailForm',
+    tagName: 'BUTTON',
+    textContent: 'Confirm',
+    disabled: true,
+    getAttribute(name) {
+      if (name === 'aria-disabled') {
+        return this.disabled ? 'true' : 'false';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 80, height: 24 };
+    },
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === '#btnNewEmailForm') {
+      return confirmButton;
+    }
+    if (selector.includes('.cf-turnstile') || selector.includes('.html-captcha') || selector.includes('cf-turnstile-response')) {
+      return challengeVisible ? turnstileContainer : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [confirmButton];
+    }
+    return [];
+  };
+  context.chrome.runtime.sendMessage = (message, callback) => {
+    context.__state.runtimeMessages = context.__state.runtimeMessages || [];
+    context.__state.runtimeMessages.push(message);
+    if (message.type === 'DEBUGGER_CLICK_AT') {
+      challengeVisible = false;
+      confirmButton.disabled = false;
+    }
+    const response = { ok: true };
+    if (typeof callback === 'function') {
+      callback(response);
+    }
+    return Promise.resolve(response);
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.waitForCloudflareConfirm, 'expected tmailor to expose waitForCloudflareConfirm');
+
+  const handled = await hooks.waitForCloudflareConfirm();
+
+  assert.equal(handled, true);
+  assert.equal(context.__state.runtimeMessages?.[0]?.type, 'DEBUGGER_CLICK_AT');
+  assert.equal(context.__state.runtimeMessages?.[0]?.payload?.rect?.centerX, 116);
+  assert.equal(context.__state.runtimeMessages?.[0]?.payload?.rect?.centerY, 180);
+  assert.equal(context.__state.clicked, 1);
+  assert.equal(context.__state.lastClicked?.id, 'btnNewEmailForm');
+});
+
+test('tmailor treats a visible turnstile container as a manual takeover blocker even without body text', () => {
+  const context = createContext();
+  const turnstileContainer = {
+    tagName: 'DIV',
+    className: 'cf-turnstile',
+    getBoundingClientRect() {
+      return { left: 60, top: 120, width: 300, height: 80 };
+    },
+  };
+
+  context.document.body.innerText = '';
+  context.document.querySelector = (selector) => {
+    if (selector.includes('.cf-turnstile') || selector.includes('.html-captcha') || selector.includes('cf-turnstile-response')) {
+      return turnstileContainer;
+    }
+    return null;
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.assertNoManualTakeoverBlockers, 'expected tmailor to expose assertNoManualTakeoverBlockers');
+
+  assert.throws(
+    () => hooks.assertNoManualTakeoverBlockers(),
+    /Cloudflare challenge detected on TMailor\. Temporary failure, please take over manually\./i
+  );
+});
+
+test('tmailor treats the currentEmailAddress soft firewall message as a manual takeover blocker even when the turnstile shell is not visible', () => {
+  const context = createContext();
+  const currentEmailInput = {
+    tagName: 'INPUT',
+    value: 'We detected that you are performing the operation too fast, please confirm you are not a robot.',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'aria-label') {
+        return 'Your Temp Mail Address';
+      }
+      if (name === 'title') {
+        return 'We detected that you are performing the operation too fast, please confirm you are not a robot.';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 32, top: 96, width: 320, height: 64 };
+    },
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === 'input[name="currentEmailAddress"]') {
+      return currentEmailInput;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = () => [];
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.assertNoManualTakeoverBlockers, 'expected tmailor to expose assertNoManualTakeoverBlockers');
+
+  assert.throws(
+    () => hooks.assertNoManualTakeoverBlockers(),
+    /Cloudflare challenge detected on TMailor\. Temporary failure, please take over manually\./i
+  );
+});
+
+test('tmailor logs full-page Cloudflare challenge details when the response input is present on the waiting page', async () => {
+  const context = createContext();
+  context.document.body.innerText = 'tmailor.com 正在进行安全验证 本网站使用安全服务防护恶意自动程序。';
+
+  const wrapper = {
+    tagName: 'DIV',
+    id: '',
+    className: 'main-wrapper lang-zh-cn',
+    getAttribute(name) {
+      if (name === 'role') {
+        return 'main';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 1200, height: 900 };
+    },
+  };
+  const responseInput = {
+    tagName: 'INPUT',
+    id: 'cf-chl-widget-123_response',
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 0, height: 0 };
+    },
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === '.main-wrapper[role="main"]') {
+      return wrapper;
+    }
+    if (selector.includes('input[name="cf-turnstile-response"]')) {
+      return responseInput;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = () => [];
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.waitForCloudflareConfirm, 'expected tmailor to expose waitForCloudflareConfirm');
+
+  await hooks.waitForCloudflareConfirm(50);
+
+  assert.ok(
+    context.__state.logs.some((entry) => /Cloudflare challenge details: full-page challenge/i.test(entry.message)),
+    'expected a full-page Cloudflare diagnostic log'
+  );
+  assert.ok(
+    context.__state.logs.some((entry) => /Cloudflare checkbox detected, clicking verification area/i.test(entry.message)),
+    'expected a checkbox click attempt log'
+  );
+});
+
+test('tmailor targets the left-side turnstile checkbox area instead of the middle of the widget', async () => {
+  const context = createContext();
+  const state = context.__state;
+  const iframe = {
+    tagName: 'IFRAME',
+    src: 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv/123',
+    title: 'Widget containing a Cloudflare security challenge',
+    getAttribute(name) {
+      if (name === 'src') return this.src;
+      if (name === 'title') return this.title;
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 120, top: 260, width: 300, height: 65 };
+    },
+  };
+  const confirmButton = {
+    tagName: 'BUTTON',
+    id: 'btnNewEmailForm',
+    disabled: false,
+    textContent: 'Confirm',
+    getAttribute(name) {
+      if (name === 'title') return 'Create a new email address';
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 200, top: 360, width: 120, height: 42 };
+    },
+  };
+
+  let challengeVisible = true;
+  context.document.body.innerText = 'Please verify that you are not a robot.';
+  context.document.querySelector = (selector) => {
+    if (selector === '#btnNewEmailForm') {
+      return confirmButton;
+    }
+    if (selector.includes('iframe[src*="challenges.cloudflare.com"]') || selector.includes('iframe[title*="Cloudflare"]') || selector.includes('iframe[title*="Widget containing"]')) {
+      return challengeVisible ? iframe : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [confirmButton];
+    }
+    return [];
+  };
+  context.chrome.runtime.sendMessage = (message, callback) => {
+    state.runtimeMessages = state.runtimeMessages || [];
+    state.runtimeMessages.push(message);
+    if (message.type === 'DEBUGGER_CLICK_AT') {
+      challengeVisible = false;
+      context.document.body.innerText = '';
+    }
+    const response = { ok: true };
+    if (typeof callback === 'function') {
+      callback(response);
+    }
+    return Promise.resolve(response);
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.waitForCloudflareConfirm, 'expected tmailor to expose waitForCloudflareConfirm');
+
+  const handled = await hooks.waitForCloudflareConfirm(1200);
+
+  assert.equal(handled, true);
+  const clickMessage = (state.runtimeMessages || []).find((entry) => entry.type === 'DEBUGGER_CLICK_AT');
+  assert.ok(clickMessage, 'expected a debugger click request for the turnstile');
+  assert.equal(Math.round(clickMessage.payload.rect.centerY), 293);
+  assert.equal(Math.round(clickMessage.payload.rect.centerX), 156);
 });
 
 test('tmailor closes blocking ads before continuing mailbox actions', async () => {
@@ -517,6 +1298,10 @@ test('tmailor closes blocking ads before continuing mailbox actions', async () =
   assert.ok(
     context.__state.logs.some((entry) => /Blocking overlay detected, clicking Close/i.test(entry.message)),
     'expected an overlay click log'
+  );
+  assert.ok(
+    context.__state.logs.some((entry) => /close: BUTTON/i.test(entry.message)),
+    'expected the overlay click log to include the close-button details'
   );
   assert.ok(
     context.__state.logs.some((entry) => /Blocking overlay closed successfully/i.test(entry.message)),
@@ -559,6 +1344,493 @@ test('tmailor ignores the google side-rail notification close control', async ()
   assert.equal(context.__state.lastClicked, null);
 });
 
+test('tmailor plays and closes the monetization video ad overlay', async () => {
+  const context = createContext();
+  const state = context.__state;
+  state.dialogVisible = true;
+  state.adVisible = false;
+  state.closeVisible = false;
+
+  const monetizationDialog = {
+    getBoundingClientRect() {
+      return { width: 480, height: 320 };
+    },
+  };
+  const playButton = {
+    tagName: 'BUTTON',
+    textContent: 'View a short ad',
+    getBoundingClientRect() {
+      return { width: 120, height: 36 };
+    },
+  };
+  const adCloseButton = {
+    tagName: 'DIV',
+    textContent: 'Close',
+    getBoundingClientRect() {
+      return { width: 80, height: 30 };
+    },
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog') {
+      return state.dialogVisible ? monetizationDialog : null;
+    }
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog > div > div.fc-list-container > button') {
+      return state.dialogVisible ? playButton : null;
+    }
+    if (selector === '#dismiss-button-element > div') {
+      return state.adVisible && state.closeVisible ? adCloseButton : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = () => [];
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === playButton) {
+      state.dialogVisible = false;
+      state.adVisible = true;
+    }
+    if (target === adCloseButton) {
+      state.adVisible = false;
+      state.closeVisible = false;
+    }
+  };
+  context.sleep = async () => {
+    state.sleepCalls += 1;
+    if (state.adVisible && state.sleepCalls >= 2) {
+      state.closeVisible = true;
+    }
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.handleMonetizationVideoAd, 'expected tmailor to expose handleMonetizationVideoAd');
+
+  const handled = await hooks.handleMonetizationVideoAd();
+
+  assert.equal(handled, true);
+  assert.equal(state.clicked, 2);
+  assert.equal(state.lastClicked, adCloseButton);
+  assert.ok(
+    state.logs.some((entry) => /video ad overlay detected, clicking Play/i.test(entry.message)),
+    'expected a play log'
+  );
+  assert.ok(
+    state.logs.some((entry) => /play: BUTTON/i.test(entry.message)),
+    'expected the play log to include element details'
+  );
+  assert.ok(
+    state.logs.some((entry) => /video ad finished, clicking Close/i.test(entry.message)),
+    'expected a close log'
+  );
+});
+
+test('tmailor waitForMailboxControls auto-handles the monetization video ad before continuing', async () => {
+  const context = createContext();
+  const state = context.__state;
+  state.dialogVisible = true;
+  state.adVisible = false;
+  state.closeVisible = false;
+  state.controlsVisible = false;
+
+  const monetizationDialog = {
+    getBoundingClientRect() {
+      return { width: 480, height: 320 };
+    },
+  };
+  const playButton = {
+    tagName: 'BUTTON',
+    textContent: 'View a short ad',
+    getBoundingClientRect() {
+      return { width: 120, height: 36 };
+    },
+  };
+  const adCloseButton = {
+    tagName: 'DIV',
+    textContent: 'Close',
+    getBoundingClientRect() {
+      return { width: 80, height: 30 };
+    },
+  };
+  const newEmailButton = {
+    tagName: 'BUTTON',
+    textContent: 'New Email',
+    getBoundingClientRect() {
+      return { width: 88, height: 28 };
+    },
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog') {
+      return state.dialogVisible ? monetizationDialog : null;
+    }
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog > div > div.fc-list-container > button') {
+      return state.dialogVisible ? playButton : null;
+    }
+    if (selector === '#dismiss-button-element > div') {
+      return state.adVisible && state.closeVisible ? adCloseButton : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return state.controlsVisible ? [newEmailButton] : [];
+    }
+    return [];
+  };
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === playButton) {
+      state.dialogVisible = false;
+      state.adVisible = true;
+    }
+    if (target === adCloseButton) {
+      state.adVisible = false;
+      state.closeVisible = false;
+      state.controlsVisible = true;
+    }
+  };
+  context.sleep = async () => {
+    state.sleepCalls += 1;
+    if (state.adVisible && state.sleepCalls >= 2) {
+      state.closeVisible = true;
+    }
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.waitForMailboxControls, 'expected tmailor test hooks to expose waitForMailboxControls');
+
+  await assert.doesNotReject(() => hooks.waitForMailboxControls(1500));
+  assert.equal(state.controlsVisible, true);
+  assert.equal(state.lastClicked, adCloseButton);
+});
+
+test('tmailor patrol handles a monetization dialog that appears during the row-open wait', async () => {
+  const context = createContext();
+  const state = context.__state;
+  state.dialogVisible = false;
+  state.adVisible = false;
+  state.closeVisible = false;
+
+  const rowTarget = {
+    getBoundingClientRect() {
+      return { width: 120, height: 24 };
+    },
+  };
+  const monetizationDialog = {
+    getBoundingClientRect() {
+      return { width: 480, height: 320 };
+    },
+  };
+  const playButton = {
+    tagName: 'BUTTON',
+    textContent: 'View a short ad',
+    getBoundingClientRect() {
+      return { width: 120, height: 36 };
+    },
+  };
+  const adCloseButton = {
+    tagName: 'DIV',
+    textContent: 'Close',
+    getBoundingClientRect() {
+      return { width: 80, height: 30 };
+    },
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog') {
+      return state.dialogVisible ? monetizationDialog : null;
+    }
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog > div > div.fc-list-container > button') {
+      return state.dialogVisible ? playButton : null;
+    }
+    if (selector === '#dismiss-button-element > div') {
+      return state.adVisible && state.closeVisible ? adCloseButton : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = () => [];
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === rowTarget) {
+      state.rowOpened = true;
+    }
+    if (target === playButton) {
+      state.dialogVisible = false;
+      state.adVisible = true;
+    }
+    if (target === adCloseButton) {
+      state.adVisible = false;
+      state.closeVisible = false;
+    }
+  };
+  context.sleep = async () => {
+    state.sleepCalls += 1;
+    if (state.rowOpened && !state.dialogVisible && !state.adVisible && state.sleepCalls === 1) {
+      state.dialogVisible = true;
+    }
+    if (state.adVisible && state.sleepCalls >= 3) {
+      state.closeVisible = true;
+    }
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.clickMailRow, 'expected tmailor test hooks to expose clickMailRow');
+
+  await hooks.clickMailRow({ element: rowTarget });
+
+  assert.equal(state.clicked, 3);
+  assert.equal(state.lastClicked, adCloseButton);
+  assert.ok(
+    state.logs.some((entry) => /Interruption sweep handled a mailbox blocker during opening a matched inbox row/i.test(entry.message)),
+    'expected a patrol log after handling the mid-run dialog'
+  );
+});
+
+test('tmailor patrol does not re-enter while an interruption handler is already running', async () => {
+  const context = createContext();
+  const state = context.__state;
+  state.dialogVisible = true;
+  state.adVisible = false;
+  state.closeVisible = false;
+  state.nestedSweepResults = [];
+  let hooks = null;
+
+  const monetizationDialog = {
+    getBoundingClientRect() {
+      return { width: 480, height: 320 };
+    },
+  };
+  const playButton = {
+    tagName: 'BUTTON',
+    textContent: 'View a short ad',
+    getBoundingClientRect() {
+      return { width: 120, height: 36 };
+    },
+  };
+  const adCloseButton = {
+    tagName: 'DIV',
+    textContent: 'Close',
+    getBoundingClientRect() {
+      return { width: 80, height: 30 };
+    },
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog') {
+      return state.dialogVisible ? monetizationDialog : null;
+    }
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-list-container > button') {
+      return state.dialogVisible ? playButton : null;
+    }
+    if (selector === 'body > div.fc-message-root > div.fc-monetization-dialog-container > div.fc-monetization-dialog.fc-dialog > div > div.fc-list-container > button') {
+      return state.dialogVisible ? playButton : null;
+    }
+    if (selector === '#dismiss-button-element > div') {
+      return state.adVisible && state.closeVisible ? adCloseButton : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = () => [];
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === playButton) {
+      state.dialogVisible = false;
+      state.adVisible = true;
+    }
+    if (target === adCloseButton) {
+      state.adVisible = false;
+      state.closeVisible = false;
+    }
+  };
+  context.sleep = async () => {
+    state.sleepCalls += 1;
+    if (hooks && state.sleepCalls === 1) {
+      state.nestedSweepResults.push(await hooks.runMailboxInterruptionSweep({ reason: 'nested test sweep', includeCloudflare: false }));
+    }
+    if (state.adVisible && state.sleepCalls >= 2) {
+      state.closeVisible = true;
+    }
+  };
+
+  loadTmailorScript(context);
+  hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.runMailboxInterruptionSweep, 'expected tmailor test hooks to expose runMailboxInterruptionSweep');
+
+  const handled = await hooks.runMailboxInterruptionSweep({ reason: 'top-level test sweep', includeCloudflare: false });
+
+  assert.equal(handled, true);
+  assert.deepEqual(state.nestedSweepResults, [false]);
+  assert.equal(state.clicked, 2);
+});
+
+test('tmailor closes the ad_position_box overlay with the dismiss button selector', async () => {
+  const context = createContext();
+  const state = context.__state;
+  state.interstitialVisible = true;
+
+  const adBox = {
+    id: 'ad_position_box',
+    getBoundingClientRect() {
+      return { width: 480, height: 320 };
+    },
+  };
+  const dismissClose = {
+    tagName: 'DIV',
+    textContent: 'Close',
+    getBoundingClientRect() {
+      return { width: 80, height: 30 };
+    },
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === '#ad_position_box') {
+      return state.interstitialVisible ? adBox : null;
+    }
+    if (selector === '#dismiss-button-element > div') {
+      return state.interstitialVisible ? dismissClose : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = () => [];
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === dismissClose) {
+      state.interstitialVisible = false;
+    }
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.dismissBlockingOverlay, 'expected tmailor to expose dismissBlockingOverlay');
+
+  const handled = await hooks.dismissBlockingOverlay(100);
+
+  assert.equal(handled, true);
+  assert.equal(state.lastClicked, dismissClose);
+  assert.ok(
+    state.logs.some((entry) => /Blocking overlay detected, clicking Close/i.test(entry.message)),
+    'expected an interstitial close log'
+  );
+});
+
+test('tmailor waitForMailboxControls auto-attempts Cloudflare before allowing manual takeover', async () => {
+  const context = createContext();
+  const state = context.__state;
+  let challengeVisible = true;
+  let controlsVisible = false;
+
+  const turnstileContainer = {
+    tagName: 'DIV',
+    className: 'cf-turnstile',
+    getBoundingClientRect() {
+      return { left: 80, top: 140, width: 300, height: 80 };
+    },
+  };
+  const confirmButton = {
+    id: 'btnNewEmailForm',
+    tagName: 'BUTTON',
+    textContent: 'Confirm',
+    disabled: true,
+    getAttribute(name) {
+      if (name === 'aria-disabled') {
+        return this.disabled ? 'true' : 'false';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 80, height: 24 };
+    },
+  };
+  const newEmailButton = {
+    id: 'btnNewEmail',
+    tagName: 'BUTTON',
+    textContent: 'New Email',
+    getBoundingClientRect() {
+      return { width: 88, height: 28 };
+    },
+  };
+  const currentEmailInput = {
+    tagName: 'INPUT',
+    value: '',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'aria-label') {
+        return 'Your Temp Mail Address';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 420, top: 420, width: 520, height: 64 };
+    },
+  };
+
+  context.document.body.innerText = 'Please verify that you are not a robot.';
+  context.document.querySelector = (selector) => {
+    if (selector === '#btnNewEmailForm') {
+      return confirmButton;
+    }
+    if (selector === '#btnNewEmail') {
+      return controlsVisible ? newEmailButton : null;
+    }
+    if (selector === 'input[name="currentEmailAddress"]') {
+      return controlsVisible ? currentEmailInput : null;
+    }
+    if (selector.includes('.cf-turnstile') || selector.includes('.html-captcha') || selector.includes('cf-turnstile-response')) {
+      return challengeVisible ? turnstileContainer : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      const items = [];
+      if (challengeVisible) items.push(confirmButton);
+      if (controlsVisible) items.push(newEmailButton);
+      return items;
+    }
+    return [];
+  };
+  context.chrome.runtime.sendMessage = (message, callback) => {
+    state.runtimeMessages = state.runtimeMessages || [];
+    state.runtimeMessages.push(message);
+    if (message.type === 'DEBUGGER_CLICK_AT') {
+      challengeVisible = false;
+      controlsVisible = true;
+      confirmButton.disabled = false;
+      context.document.body.innerText = '';
+    }
+    const response = { ok: true };
+    if (typeof callback === 'function') {
+      callback(response);
+    }
+    return Promise.resolve(response);
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.waitForMailboxControls, 'expected tmailor test hooks to expose waitForMailboxControls');
+
+  await assert.doesNotReject(() => hooks.waitForMailboxControls(500));
+  assert.equal(state.runtimeMessages?.[0]?.type, 'DEBUGGER_CLICK_AT');
+  assert.ok(
+    state.logs.some((entry) => /attempting automatic verification first/i.test(entry.message)),
+    'expected an auto-attempt log before manual takeover'
+  );
+  assert.ok(
+    state.logs.some((entry) => /challenge cleared automatically/i.test(entry.message)),
+    'expected an automatic-clear success log'
+  );
+});
+
 test('tmailor detects fatal server errors and suggests changing node', async () => {
   const context = createContext();
   context.document.body.innerText = 'An error occurred on the server. Please try again later';
@@ -570,6 +1842,128 @@ test('tmailor detects fatal server errors and suggests changing node', async () 
 
   assert.throws(
     () => hooks.assertNoFatalMailboxError(),
-    /TMailor server error detected while refreshing the mailbox\. Please change node and retry\./i
+    /TMailor server error detected while refreshing the mailbox\. The node or current network path may be unstable\. Change node first; if it still fails across nodes, try again later\./i
+  );
+});
+
+test('tmailor detects fatal server errors from the disabled currentEmailAddress input state', async () => {
+  const context = createContext();
+  const fatalInput = {
+    disabled: true,
+    value: 'An error occurred on the server. Please try again later',
+    title: 'An error occurred on the server. Please try again later',
+    getAttribute(name) {
+      if (name === 'title') return this.title;
+      if (name === 'aria-label') return 'Your Temp Mail Address';
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 280, height: 64 };
+    },
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === 'input[name="currentEmailAddress"]') {
+      return fatalInput;
+    }
+    return null;
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.assertNoFatalMailboxError, 'expected tmailor to expose assertNoFatalMailboxError');
+
+  assert.throws(
+    () => hooks.assertNoFatalMailboxError(),
+    /TMailor server error detected while refreshing the mailbox\. The node or current network path may be unstable\. Change node first; if it still fails across nodes, try again later\./i
+  );
+});
+
+test('tmailor stops and asks for manual takeover when a Cloudflare challenge is visible', async () => {
+  const context = createContext();
+  context.document.body.innerText = 'Please verify that you are not a robot.';
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.waitForMailboxControls, 'expected tmailor test hooks to expose waitForMailboxControls');
+
+  await assert.rejects(
+    () => hooks.waitForMailboxControls(100),
+    /Cloudflare challenge detected on TMailor\. Automatic verification did not complete, please take over manually\./i
+  );
+  assert.ok(
+    context.__state.logs.some((entry) => /attempting automatic verification first/i.test(entry.message)),
+    'expected an auto-attempt log before manual takeover'
+  );
+});
+
+test('tmailor stops and asks for manual takeover when a blocking ad close button is visible', async () => {
+  const context = createContext();
+  const closeButton = {
+    tagName: 'BUTTON',
+    textContent: 'Close',
+    getBoundingClientRect() {
+      return { width: 88, height: 28 };
+    },
+  };
+  context.document.querySelector = () => null;
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [closeButton];
+    }
+    return [];
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.waitForMailboxControls, 'expected tmailor test hooks to expose waitForMailboxControls');
+
+  await assert.rejects(
+    () => hooks.waitForMailboxControls(100),
+    /Blocking overlay detected on TMailor\. Temporary failure, please take over manually\./i
+  );
+});
+
+test('tmailor fetch email stops and asks for manual takeover when Cloudflare confirm times out but the challenge is still visible', async () => {
+  const context = createContext();
+  context.document.body.innerText = 'Please verify that you are not a robot.';
+  const confirmButton = {
+    id: 'btnNewEmailForm',
+    tagName: 'BUTTON',
+    textContent: 'Confirm',
+    disabled: false,
+    getAttribute() {
+      return 'false';
+    },
+    getBoundingClientRect() {
+      return { width: 80, height: 24 };
+    },
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === '#btnNewEmailForm') {
+      return confirmButton;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [
+        { textContent: 'New Email', getBoundingClientRect() { return { width: 88, height: 28 }; } },
+        confirmButton,
+      ];
+    }
+    return [];
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.fetchTmailorEmail, 'expected tmailor to expose fetchTmailorEmail');
+
+  await assert.rejects(
+    () => hooks.fetchTmailorEmail({ generateNew: true, domainState: {} }),
+    /Cloudflare challenge detected on TMailor\. Automatic verification did not complete, please take over manually\./i
   );
 });
