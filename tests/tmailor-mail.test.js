@@ -525,7 +525,7 @@ test('tmailor keeps waiting when the mail detail opens successfully but the veri
   assert.equal(code, '778899');
 });
 
-test('tmailor returns to the inbox after step 4 reads the code from the mail detail page', async () => {
+test('tmailor returns directly to the mailbox home page after step 4 reads the code from the mail detail page', async () => {
   const context = createContext();
   const state = context.__state;
   context.location.href = 'https://tmailor.com/inbox?emailid=detail-123';
@@ -579,7 +579,8 @@ test('tmailor returns to the inbox after step 4 reads the code from the mail det
   const code = await hooks.readCodeFromMailRow(row, 4);
 
   assert.equal(code, '009087');
-  assert.equal(state.historyBackCalls, 1);
+  assert.equal(context.location.href, 'https://tmailor.com/');
+  assert.equal(state.historyBackCalls, 0);
 });
 
 test('tmailor step 7 returns to the mailbox home page after opening the mail detail', async () => {
@@ -733,7 +734,7 @@ test('tmailor handlePollEmail can resume on the mail detail page after reinjecti
   assert.equal(state.historyBackCalls, 0);
 });
 
-test('tmailor falls back to the mailbox home page when history.back leaves the detail page open', async () => {
+test('tmailor leaves the detail page by navigating straight to the mailbox home page', async () => {
   const context = createContext();
   const state = context.__state;
   context.location.href = 'https://tmailor.com/inbox?emailid=detail-stuck';
@@ -769,8 +770,8 @@ test('tmailor falls back to the mailbox home page when history.back leaves the d
   const code = await hooks.readCodeFromMailRow(row, 4);
 
   assert.equal(code, '009087');
-  assert.equal(state.historyBackCalls, 1);
   assert.equal(context.location.href, 'https://tmailor.com/');
+  assert.equal(state.historyBackCalls, 0);
 });
 
 test('tmailor clicks the dismiss button root when the visible Close text is only a child node', async () => {

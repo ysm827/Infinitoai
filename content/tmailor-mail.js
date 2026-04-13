@@ -1391,32 +1391,11 @@ async function waitForCodeInPage(timeoutMs = 4000, intervalMs = 250) {
   return null;
 }
 
-function findMailboxBackButton() {
-  return findButtonByText([/back/i, /inbox/i, /messages/i, /mailbox/i]);
-}
-
 async function leaveMailDetailView() {
-  const backButton = findMailboxBackButton();
-  if (backButton) {
-    simulateClick(backButton);
-    await sleepWithMailboxPatrol(900, { reason: 'leaving the mail detail view' });
-    return true;
-  }
-
-  if (window.history && typeof window.history.back === 'function') {
-    window.history.back();
-    await sleepWithMailboxPatrol(900, { reason: 'leaving the mail detail view' });
-    if (!/emailid=/i.test(location.href)) {
-      return true;
-    }
-
-    log('TMailor: Browser back left the mail detail page open, navigating back to the mailbox home page.', 'info');
-    location.href = 'https://tmailor.com/';
-    await sleepWithMailboxPatrol(1200, { reason: 'returning to the mailbox home page' });
-    return true;
-  }
-
-  return false;
+  log('TMailor: Leaving the mail detail view by navigating directly to the mailbox home page.', 'info');
+  location.href = 'https://tmailor.com/';
+  await sleepWithMailboxPatrol(1200, { reason: 'returning to the mailbox home page' });
+  return true;
 }
 
 async function readCodeFromMailRow(row, step = 0) {
