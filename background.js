@@ -1957,6 +1957,7 @@ async function recordVisibleAutoRunFailure(errorMessage, overrides = {}) {
     step: overrides.step ?? 0,
     currentRunStep: overrides.currentRunStep ?? state.currentRunStep ?? 0,
     currentStep: overrides.currentStep ?? state.currentStep ?? 0,
+    currentEmail: overrides.currentEmail ?? state.email ?? '',
     timestamp: overrides.timestamp ?? Date.now(),
   });
 
@@ -2025,6 +2026,8 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
   }
   await setState({ autoRunning: true });
   let handedOffToManual = false;
+  let sessionSuccessfulRuns = 0;
+  let sessionFailedRuns = 0;
 
   for (let run = startingRun; autoRunInfinite || run <= totalRuns; run++) {
     autoRunCurrentRun = run;
@@ -2152,6 +2155,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
         durationMs: Math.max(0, Date.now() - runStartedAt),
         mode: autoRunCurrentSuccessMode,
       }));
+      sessionSuccessfulRuns += 1;
       await setState({ currentRunStep: 0 });
 
     } catch (err) {
@@ -2169,6 +2173,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
           totalRuns: autoRunTotalRuns,
           infiniteMode: autoRunInfinite,
         });
+        sessionFailedRuns += 1;
         await addLog(failureRecord.logMessage, 'error');
         await setState({ currentRunStep: 0 });
         if (autoRunInfinite || run < totalRuns) {
@@ -2188,6 +2193,8 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
     totalRuns: autoRunTotalRuns,
     successfulRuns: autoRunSuccessfulRuns,
     failedRuns: autoRunFailedRuns,
+    sessionSuccessfulRuns,
+    sessionFailedRuns,
     lastAttemptedRun,
     stopRequested,
     handedOffToManual,

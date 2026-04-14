@@ -87,6 +87,27 @@ test('auto run stop summary keeps success and failure statistics', () => {
   );
 });
 
+test('auto run stop summary prefers current-session counts over persisted totals when provided', () => {
+  assert.deepEqual(
+    summarizeAutoRunResult({
+      totalRuns: Number.POSITIVE_INFINITY,
+      successfulRuns: 24,
+      failedRuns: 0,
+      sessionSuccessfulRuns: 1,
+      sessionFailedRuns: 0,
+      lastAttemptedRun: 2,
+      stopRequested: true,
+      handedOffToManual: false,
+      infiniteMode: true,
+    }),
+    {
+      phase: 'stopped',
+      message: '=== Infinite auto run stopped after 1 runs (1 succeeded, 0 failed) ===',
+      toastMessage: '无限自动运行已停止：成功 1 次，失败 0 次',
+    }
+  );
+});
+
 test('infinite auto run stop summary reports completed rounds before stop', () => {
   assert.deepEqual(
     summarizeAutoRunResult({
@@ -300,6 +321,27 @@ test('buildAutoRunFailureRecord prefers the current run step when the UI current
       logMessage: 'Run 6/∞ failed: Content script on tmailor-mail did not respond in 25s. Try refreshing the tab and retry.',
       runLabel: '6/∞',
       timestamp: 999111,
+    }
+  );
+});
+
+test('buildAutoRunFailureRecord appends the current email suffix for phone verification blockers in stats logs', () => {
+  assert.deepEqual(
+    buildAutoRunFailureRecord({
+      errorMessage: 'Step 7 blocked: phone number is required on the auth page. Please change node and retry.',
+      currentRun: 9,
+      totalRuns: Number.POSITIVE_INFINITY,
+      infiniteMode: true,
+      step: 7,
+      currentEmail: 'demo@mikfarm.com',
+      timestamp: 222333,
+    }),
+    {
+      step: 7,
+      errorMessage: 'Step 7 blocked: phone number is required on the auth page (email domain: mikfarm.com). Please change node and retry.',
+      logMessage: 'Run 9/∞ failed: Step 7 blocked: phone number is required on the auth page (email domain: mikfarm.com). Please change node and retry.',
+      runLabel: '9/∞',
+      timestamp: 222333,
     }
   );
 });

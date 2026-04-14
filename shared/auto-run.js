@@ -14,12 +14,49 @@
     return typeof error === 'string' ? error : error?.message || '';
   }
 
+  function extractEmailDomain(email) {
+    const normalized = String(email || '').trim().toLowerCase();
+    const atIndex = normalized.lastIndexOf('@');
+    if (atIndex <= 0 || atIndex === normalized.length - 1) {
+      return '';
+    }
+    return normalized.slice(atIndex + 1).replace(/^@+/, '');
+  }
+
+  function decoratePhoneVerificationFailureWithEmailDomain(errorMessage, currentEmail) {
+    const message = getErrorMessage(errorMessage);
+    if (!/phone number is required on the auth page/i.test(message)) {
+      return message;
+    }
+    if (/\(email domain:/i.test(message)) {
+      return message;
+    }
+
+    const emailDomain = extractEmailDomain(currentEmail);
+    if (!emailDomain) {
+      return message;
+    }
+
+    return message.replace(
+      /phone number is required on the auth page/i,
+      `phone number is required on the auth page (email domain: ${emailDomain})`
+    );
+  }
+
   function sanitizeRunCounter(value) {
     const numeric = Number.parseInt(String(value ?? '').trim(), 10);
     if (!Number.isFinite(numeric) || numeric < 0) {
       return 0;
     }
     return numeric;
+  }
+
+  function resolveSummaryRunCounter(sessionValue, totalValue) {
+    const sessionCount = sanitizeRunCounter(sessionValue);
+    if (sessionValue !== undefined && sessionValue !== null) {
+      return sessionCount;
+    }
+    return sanitizeRunCounter(totalValue);
   }
 
   function sanitizeDurationMs(value) {
@@ -129,6 +166,7 @@
     step = 0,
     currentRunStep = 0,
     currentStep = 0,
+    currentEmail = '',
     timestamp = Date.now(),
   } = {}) {
     const runLabel = formatAutoRunLabel({
@@ -145,10 +183,12 @@
         ? normalizedCurrentRunStep
         : (Number.isFinite(normalizedCurrentStep) && normalizedCurrentStep > 0 ? normalizedCurrentStep : 0));
 
+    const decoratedErrorMessage = decoratePhoneVerificationFailureWithEmailDomain(errorMessage, currentEmail);
+
     return {
       step: resolvedStep,
-      errorMessage: getErrorMessage(errorMessage),
-      logMessage: `Run ${runLabel} failed: ${getErrorMessage(errorMessage)}`,
+      errorMessage: decoratedErrorMessage,
+      logMessage: `Run ${runLabel} failed: ${decoratedErrorMessage}`,
       runLabel,
       timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
     };
@@ -158,11 +198,16 @@
     totalRuns,
     successfulRuns,
     failedRuns,
+    sessionSuccessfulRuns,
+    sessionFailedRuns,
     lastAttemptedRun,
     stopRequested,
     handedOffToManual,
     infiniteMode = false,
   }) {
+    const summarySuccessfulRuns = resolveSummaryRunCounter(sessionSuccessfulRuns, successfulRuns);
+    const summaryFailedRuns = resolveSummaryRunCounter(sessionFailedRuns, failedRuns);
+
     if (handedOffToManual) {
       return {
         phase: 'stopped',
@@ -176,21 +221,21 @@
       if (infiniteMode) {
         return {
           phase: 'stopped',
-          message: `=== Infinite auto run stopped after ${completedRunsBeforeStop} runs (${successfulRuns} succeeded, ${failedRuns} failed) ===`,
-          toastMessage: `无限自动运行已停止：成功 ${successfulRuns} 次，失败 ${failedRuns} 次`,
+          message: `=== Infinite auto run stopped after ${completedRunsBeforeStop} runs (${summarySuccessfulRuns} succeeded, ${summaryFailedRuns} failed) ===`,
+          toastMessage: `无限自动运行已停止：成功 ${summarySuccessfulRuns} 次，失败 ${summaryFailedRuns} 次`,
         };
       }
       return {
         phase: 'stopped',
-        message: `=== Stopped after ${completedRunsBeforeStop}/${totalRuns} runs (${successfulRuns} succeeded, ${failedRuns} failed) ===`,
-        toastMessage: `自动运行已停止：成功 ${successfulRuns} 次，失败 ${failedRuns} 次`,
+        message: `=== Stopped after ${completedRunsBeforeStop}/${totalRuns} runs (${summarySuccessfulRuns} succeeded, ${summaryFailedRuns} failed) ===`,
+        toastMessage: `自动运行已停止：成功 ${summarySuccessfulRuns} 次，失败 ${summaryFailedRuns} 次`,
       };
     }
 
     return {
       phase: 'complete',
-      message: `=== Auto run finished: ${successfulRuns} succeeded, ${failedRuns} failed, ${totalRuns} total ===`,
-      toastMessage: `自动运行完成：成功 ${successfulRuns} 次，失败 ${failedRuns} 次`,
+      message: `=== Auto run finished: ${summarySuccessfulRuns} succeeded, ${summaryFailedRuns} failed, ${totalRuns} total ===`,
+      toastMessage: `自动运行完成：成功 ${summarySuccessfulRuns} 次，失败 ${summaryFailedRuns} 次`,
     };
   }
 
