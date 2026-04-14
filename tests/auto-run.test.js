@@ -2,9 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+  buildAutoRunLogSilenceErrorMessage,
   buildAutoRunStatusPayload,
   buildAutoRunFailureRecord,
   formatAutoRunLabel,
+  shouldContinueAutoRunAfterWatchdog,
   shouldStartNextInfiniteRunAfterManualFlow,
   shouldContinueAutoRunAfterError,
   summarizeAutoRunResult,
@@ -32,6 +35,21 @@ test('auto run stops on stop and manual-handoff sentinel errors', () => {
   );
   assert.equal(
     shouldContinueAutoRunAfterError(new Error('Auto run handed off to manual continuation.')),
+    false
+  );
+});
+
+test('watchdog failures keep infinite and non-final runs moving to the next round', () => {
+  assert.equal(
+    shouldContinueAutoRunAfterWatchdog({ currentRun: 4, totalRuns: Number.POSITIVE_INFINITY, infiniteMode: true }),
+    true
+  );
+  assert.equal(
+    shouldContinueAutoRunAfterWatchdog({ currentRun: 2, totalRuns: 5, infiniteMode: false }),
+    true
+  );
+  assert.equal(
+    shouldContinueAutoRunAfterWatchdog({ currentRun: 5, totalRuns: 5, infiniteMode: false }),
     false
   );
 });
@@ -342,6 +360,43 @@ test('buildAutoRunFailureRecord appends the current email suffix for phone verif
       logMessage: 'Run 9/∞ failed: Step 7 blocked: phone number is required on the auth page (email domain: mikfarm.com). Please change node and retry.',
       runLabel: '9/∞',
       timestamp: 222333,
+    }
+  );
+});
+
+test('buildAutoRunLogSilenceErrorMessage describes the timeout and the last visible log', () => {
+  assert.equal(
+    buildAutoRunLogSilenceErrorMessage({
+      timeoutMs: DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+      lastLogMessage: 'Step 8: Debugger click dispatched, waiting for redirect...',
+      lastLogLevel: 'info',
+      now: 1710000060000,
+      lastLogTimestamp: 1710000000000,
+    }),
+    'Auto run watchdog detected 60s without new logs. Last log 60s ago: [info] Step 8: Debugger click dispatched, waiting for redirect...'
+  );
+});
+
+test('buildAutoRunFailureRecord keeps the failure reason stable and appends the last log context only to the display log', () => {
+  assert.deepEqual(
+    buildAutoRunFailureRecord({
+      errorMessage: 'Auto run watchdog detected 60s without new logs.',
+      currentRun: 12,
+      totalRuns: Number.POSITIVE_INFINITY,
+      infiniteMode: true,
+      step: 8,
+      lastLogMessage: 'Step 8: Debugger click dispatched, waiting for redirect...',
+      lastLogLevel: 'info',
+      timestamp: 456789,
+    }),
+    {
+      step: 8,
+      errorMessage: 'Auto run watchdog detected 60s without new logs.',
+      logMessage: 'Run 12/∞ failed: Auto run watchdog detected 60s without new logs. Last log before stall: [info] Step 8: Debugger click dispatched, waiting for redirect...',
+      runLabel: '12/∞',
+      timestamp: 456789,
+      lastLogMessage: 'Step 8: Debugger click dispatched, waiting for redirect...',
+      lastLogLevel: 'info',
     }
   );
 });

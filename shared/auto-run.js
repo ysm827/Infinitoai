@@ -9,6 +9,8 @@
 })(typeof globalThis !== 'undefined' ? globalThis : self, function() {
   const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
   const AUTO_RUN_HANDOFF_MESSAGE = 'Auto run handed off to manual continuation.';
+  const AUTO_RUN_LOG_SILENCE_ERROR_PREFIX = 'Auto run watchdog detected ';
+  const DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS = 60000;
 
   function getErrorMessage(error) {
     return typeof error === 'string' ? error : error?.message || '';
@@ -97,11 +99,67 @@
     return message !== STOP_ERROR_MESSAGE && message !== AUTO_RUN_HANDOFF_MESSAGE;
   }
 
+  function formatSilenceTimeoutLabel(timeoutMs) {
+    const seconds = Math.max(1, Math.round(sanitizeDurationMs(timeoutMs) / 1000) || Math.round(DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS / 1000));
+    return `${seconds}s`;
+  }
+
+  function formatLastLogSummary({
+    lastLogMessage = '',
+    lastLogLevel = '',
+  } = {}) {
+    const message = String(lastLogMessage || '').trim();
+    if (!message) {
+      return '';
+    }
+
+    const level = String(lastLogLevel || '').trim().toLowerCase();
+    return level ? `[${level}] ${message}` : message;
+  }
+
+  function buildAutoRunLogSilenceErrorMessage({
+    timeoutMs = DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+    lastLogMessage = '',
+    lastLogLevel = '',
+    lastLogTimestamp = 0,
+    now = Date.now(),
+  } = {}) {
+    const timeoutLabel = formatSilenceTimeoutLabel(timeoutMs);
+    const summary = formatLastLogSummary({ lastLogMessage, lastLogLevel });
+    if (!summary) {
+      return `${AUTO_RUN_LOG_SILENCE_ERROR_PREFIX}${timeoutLabel} without new logs.`;
+    }
+
+    const elapsedSeconds = Number.isFinite(lastLogTimestamp) && Number.isFinite(now) && now > lastLogTimestamp
+      ? Math.max(1, Math.round((now - lastLogTimestamp) / 1000))
+      : null;
+    const elapsedLabel = elapsedSeconds ? ` ${elapsedSeconds}s ago` : '';
+    return `${AUTO_RUN_LOG_SILENCE_ERROR_PREFIX}${timeoutLabel} without new logs. Last log${elapsedLabel}: ${summary}`;
+  }
+
+  function isAutoRunLogSilenceError(error) {
+    return getErrorMessage(error).startsWith(AUTO_RUN_LOG_SILENCE_ERROR_PREFIX);
+  }
+
   function shouldStartNextInfiniteRunAfterManualFlow({
     autoRunInfinite = false,
     stopRequested = false,
   } = {}) {
     return Boolean(autoRunInfinite) && !Boolean(stopRequested);
+  }
+
+  function shouldContinueAutoRunAfterWatchdog({
+    currentRun = 0,
+    totalRuns = 0,
+    infiniteMode = false,
+  } = {}) {
+    if (Boolean(infiniteMode) || totalRuns === Number.POSITIVE_INFINITY) {
+      return true;
+    }
+
+    const run = Math.max(0, Number.parseInt(String(currentRun ?? 0).trim(), 10) || 0);
+    const total = Math.max(0, Number.parseInt(String(totalRuns ?? 0).trim(), 10) || 0);
+    return run < total;
   }
 
   function buildAutoRunStatusPayload({
@@ -167,6 +225,8 @@
     currentRunStep = 0,
     currentStep = 0,
     currentEmail = '',
+    lastLogMessage = '',
+    lastLogLevel = '',
     timestamp = Date.now(),
   } = {}) {
     const runLabel = formatAutoRunLabel({
@@ -184,14 +244,29 @@
         : (Number.isFinite(normalizedCurrentStep) && normalizedCurrentStep > 0 ? normalizedCurrentStep : 0));
 
     const decoratedErrorMessage = decoratePhoneVerificationFailureWithEmailDomain(errorMessage, currentEmail);
+    const lastLogSummary = formatLastLogSummary({ lastLogMessage, lastLogLevel });
+    const decoratedLogMessage = lastLogSummary
+      ? `Run ${runLabel} failed: ${decoratedErrorMessage} Last log before stall: ${lastLogSummary}`
+      : `Run ${runLabel} failed: ${decoratedErrorMessage}`;
 
-    return {
+    const record = {
       step: resolvedStep,
       errorMessage: decoratedErrorMessage,
-      logMessage: `Run ${runLabel} failed: ${decoratedErrorMessage}`,
+      logMessage: decoratedLogMessage,
       runLabel,
       timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
     };
+
+    const normalizedLastLogMessage = String(lastLogMessage || '').trim();
+    const normalizedLastLogLevel = String(lastLogLevel || '').trim().toLowerCase();
+    if (normalizedLastLogMessage) {
+      record.lastLogMessage = normalizedLastLogMessage;
+    }
+    if (normalizedLastLogLevel) {
+      record.lastLogLevel = normalizedLastLogLevel;
+    }
+
+    return record;
   }
 
   function summarizeAutoRunResult({
@@ -240,9 +315,14 @@
   }
 
   return {
+    AUTO_RUN_LOG_SILENCE_ERROR_PREFIX,
+    DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+    buildAutoRunLogSilenceErrorMessage,
     buildAutoRunStatusPayload,
     buildAutoRunFailureRecord,
     formatAutoRunLabel,
+    isAutoRunLogSilenceError,
+    shouldContinueAutoRunAfterWatchdog,
     shouldStartNextInfiniteRunAfterManualFlow,
     shouldContinueAutoRunAfterError,
     summarizeAutoRunResult,
