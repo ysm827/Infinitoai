@@ -647,3 +647,55 @@ test('step 6 reports the latest page oauth url when it differs from the saved pa
     'expected step 6 to read the saved oauth url before deciding whether to override it'
   );
 });
+
+test('step 5 completes and lets the flow continue when the profile form never appears after verification', async () => {
+  const context = createContext({
+    href: 'https://auth.openai.com/u/signup/continue',
+    bodyText: 'Welcome back',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="name"]')) {
+        return Promise.reject(new Error('missing'));
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+  });
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'Logan',
+          lastName: 'Lee',
+          year: 1995,
+          month: 8,
+          day: 21,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.deepEqual(context.__errors, []);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.__completions)),
+    [
+      {
+        step: 5,
+        payload: {
+          skippedProfileForm: true,
+          reason: 'missing_name_input',
+        },
+      },
+    ]
+  );
+});

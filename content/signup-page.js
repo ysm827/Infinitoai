@@ -726,7 +726,12 @@ async function step5_fillNameBirthday(payload) {
       10000
     );
   } catch {
-    throw new Error('Could not find name input. URL: ' + location.href);
+    log('Step 5: Name input did not appear after verification. Treating the profile form as skipped and continuing to login...', 'warn');
+    reportComplete(5, {
+      skippedProfileForm: true,
+      reason: 'missing_name_input',
+    });
+    return;
   }
   await humanPause(500, 1300);
   fillInput(nameInput, fullName);
