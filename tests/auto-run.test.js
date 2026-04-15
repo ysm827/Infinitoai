@@ -7,8 +7,11 @@ const {
   buildAutoRunStatusPayload,
   buildAutoRunFailureRecord,
   formatAutoRunLabel,
+  getAutoRunPauseWatchdogAlarmName,
+  getAutoRunPauseWatchdogDeadline,
   shouldContinueAutoRunAfterWatchdog,
   shouldStartNextInfiniteRunAfterManualFlow,
+  shouldUsePersistentAutoRunPauseWatchdog,
   shouldSuspendAutoRunWatchdogDuringPause,
   shouldContinueAutoRunAfterError,
   summarizeAutoRunResult,
@@ -82,6 +85,32 @@ test('watchdog pause policy keeps email handoff timeouts active in infinite mode
   assert.equal(
     shouldSuspendAutoRunWatchdogDuringPause({ phase: 'waiting_email', infiniteMode: true }),
     false
+  );
+});
+
+test('infinite email handoff pauses use a persistent watchdog alarm', () => {
+  assert.equal(
+    shouldUsePersistentAutoRunPauseWatchdog({ phase: 'waiting_email', infiniteMode: true }),
+    true
+  );
+  assert.equal(
+    shouldUsePersistentAutoRunPauseWatchdog({ phase: 'waiting_email', infiniteMode: false }),
+    false
+  );
+  assert.equal(
+    shouldUsePersistentAutoRunPauseWatchdog({ phase: 'waiting_rotation', infiniteMode: true }),
+    false
+  );
+  assert.equal(
+    getAutoRunPauseWatchdogAlarmName(),
+    'infinitoai-auto-run-paused-watchdog'
+  );
+  assert.equal(
+    getAutoRunPauseWatchdogDeadline({
+      timeoutMs: DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+      now: 1710000000000,
+    }),
+    1710000060000
   );
 });
 

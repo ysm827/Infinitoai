@@ -10,6 +10,7 @@
   const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
   const AUTO_RUN_HANDOFF_MESSAGE = 'Auto run handed off to manual continuation.';
   const AUTO_RUN_LOG_SILENCE_ERROR_PREFIX = 'Auto run watchdog detected ';
+  const AUTO_RUN_PAUSED_WATCHDOG_ALARM_NAME = 'infinitoai-auto-run-paused-watchdog';
   const DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS = 60000;
 
   function getErrorMessage(error) {
@@ -183,6 +184,27 @@
     return true;
   }
 
+  function shouldUsePersistentAutoRunPauseWatchdog({
+    phase = '',
+    infiniteMode = false,
+  } = {}) {
+    const normalizedPhase = String(phase || '').trim().toLowerCase();
+    return normalizedPhase === 'waiting_email' && Boolean(infiniteMode);
+  }
+
+  function getAutoRunPauseWatchdogAlarmName() {
+    return AUTO_RUN_PAUSED_WATCHDOG_ALARM_NAME;
+  }
+
+  function getAutoRunPauseWatchdogDeadline({
+    timeoutMs = DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+    now = Date.now(),
+  } = {}) {
+    const normalizedTimeoutMs = sanitizeDurationMs(timeoutMs) || DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS;
+    const normalizedNow = Number.isFinite(now) ? now : Date.now();
+    return normalizedNow + normalizedTimeoutMs;
+  }
+
   function buildAutoRunStatusPayload({
     phase,
     currentRun,
@@ -343,9 +365,12 @@
     buildAutoRunStatusPayload,
     buildAutoRunFailureRecord,
     formatAutoRunLabel,
+    getAutoRunPauseWatchdogAlarmName,
+    getAutoRunPauseWatchdogDeadline,
     isAutoRunLogSilenceError,
     shouldContinueAutoRunAfterWatchdog,
     shouldStartNextInfiniteRunAfterManualFlow,
+    shouldUsePersistentAutoRunPauseWatchdog,
     shouldSuspendAutoRunWatchdogDuringPause,
     shouldContinueAutoRunAfterError,
     summarizeAutoRunResult,

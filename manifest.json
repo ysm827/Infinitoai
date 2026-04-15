@@ -9,6 +9,7 @@
     "webNavigation",
     "debugger",
     "storage",
+    "alarms",
     "scripting",
     "activeTab",
     "clipboardRead",

@@ -28,9 +28,12 @@ const {
   buildAutoRunStatusPayload,
   buildAutoRunFailureRecord,
   formatAutoRunLabel,
+  getAutoRunPauseWatchdogAlarmName,
+  getAutoRunPauseWatchdogDeadline,
   isAutoRunLogSilenceError,
   shouldContinueAutoRunAfterWatchdog,
   shouldContinueAutoRunAfterError,
+  shouldUsePersistentAutoRunPauseWatchdog,
   shouldStartNextInfiniteRunAfterManualFlow,
   shouldSuspendAutoRunWatchdogDuringPause,
   summarizeAutoRunResult,
@@ -941,7 +944,7 @@ async function reuseOrCreateTab(source, url, options = {}) {
 
   // Create new tab in the automation window
   const wid = await ensureAutomationWindowId();
-  if (options.reuseActiveTabOnCreate) {
+  if (shouldReuseActiveTabOnCreate(source, options)) {
     const reusableActiveTab = await findReusableActiveTabForSource(source, wid);
     if (reusableActiveTab) {
       await chrome.tabs.update(reusableActiveTab.id, { url, active: true });
@@ -1782,6 +1785,7 @@ async function handOffPausedAutoRunToManual(step) {
   resumeWaiter = null;
   autoRunActive = false;
   resetAutoRunWatchdog({ preserveLastLog: true });
+  await clearPersistentAutoRunPauseWatchdog();
 
   await setState({ autoRunning: false });
   await addLog(`Auto run handed off to manual continuation from step ${step}`, 'info');
@@ -1884,6 +1888,7 @@ async function abortCurrentAutoRunRound(options = {}) {
 
   stopRequested = true;
   resetAutoRunWatchdog({ preserveLastLog: true });
+  await clearPersistentAutoRunPauseWatchdog();
   cancelPendingCommands();
   if (webNavListener) {
     chrome.webNavigation.onBeforeNavigate.removeListener(webNavListener);
@@ -2270,6 +2275,160 @@ function markAutoRunCurrentSuccessMode(mode) {
   }
 }
 
+function getNormalizedAutoRunPauseWatchdogContext(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const normalizedPhase = String(value.phase || '').trim().toLowerCase();
+  if (!normalizedPhase) {
+    return null;
+  }
+
+  const normalizedCurrentRun = Number.parseInt(String(value.currentRun ?? '').trim(), 10);
+  const normalizedTotalRuns = value.totalRuns === Number.POSITIVE_INFINITY
+    ? Number.POSITIVE_INFINITY
+    : Number.parseInt(String(value.totalRuns ?? '').trim(), 10);
+  const normalizedTimeoutMs = Number.parseInt(String(value.timeoutMs ?? '').trim(), 10);
+  const normalizedDeadlineAt = Number.parseInt(String(value.deadlineAt ?? '').trim(), 10);
+
+  return {
+    phase: normalizedPhase,
+    currentRun: Number.isFinite(normalizedCurrentRun) && normalizedCurrentRun > 0 ? normalizedCurrentRun : 0,
+    totalRuns: normalizedTotalRuns === Number.POSITIVE_INFINITY
+      ? Number.POSITIVE_INFINITY
+      : (Number.isFinite(normalizedTotalRuns) && normalizedTotalRuns > 0 ? normalizedTotalRuns : 0),
+    infiniteMode: Boolean(value.infiniteMode),
+    timeoutMs: Number.isFinite(normalizedTimeoutMs) && normalizedTimeoutMs > 0
+      ? normalizedTimeoutMs
+      : AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+    deadlineAt: Number.isFinite(normalizedDeadlineAt) && normalizedDeadlineAt > 0
+      ? normalizedDeadlineAt
+      : 0,
+  };
+}
+
+async function clearPersistentAutoRunPauseWatchdog() {
+  if (chrome.alarms?.clear) {
+    await chrome.alarms.clear(getAutoRunPauseWatchdogAlarmName()).catch(() => {});
+  }
+  await setState({ autoRunPauseWatchdog: null });
+}
+
+async function armPersistentAutoRunPauseWatchdog(context = {}) {
+  const timeoutMs = Number.isFinite(context.timeoutMs) && context.timeoutMs > 0
+    ? context.timeoutMs
+    : AUTO_RUN_LOG_SILENCE_TIMEOUT_MS;
+  const deadlineAt = getAutoRunPauseWatchdogDeadline({
+    timeoutMs,
+    now: Date.now(),
+  });
+  const nextContext = {
+    phase: String(context.phase || '').trim().toLowerCase(),
+    currentRun: Number.parseInt(String(context.currentRun ?? '').trim(), 10) || 0,
+    totalRuns: context.infiniteMode
+      ? 0
+      : (Number.parseInt(String(context.totalRuns ?? '').trim(), 10) || 0),
+    infiniteMode: Boolean(context.infiniteMode),
+    timeoutMs,
+    deadlineAt,
+  };
+
+  await setState({ autoRunPauseWatchdog: nextContext });
+  if (chrome.alarms?.create) {
+    await chrome.alarms.create(getAutoRunPauseWatchdogAlarmName(), { when: deadlineAt });
+  }
+  return nextContext;
+}
+
+function getLastVisibleAutoRunLogEntry(state = {}) {
+  const normalized = getNormalizedLogHistory(state);
+  const rounds = Array.isArray(normalized.logRounds) ? normalized.logRounds : [];
+  const round = rounds.find((candidate) => candidate.id === normalized.currentLogRoundId) || rounds[rounds.length - 1];
+  if (!round || !Array.isArray(round.logs) || !round.logs.length) {
+    return null;
+  }
+  return round.logs[round.logs.length - 1] || null;
+}
+
+function buildPausedAutoRunWatchdogError(state = {}, context = {}) {
+  const lastLogEntry = getLastVisibleAutoRunLogEntry(state) || autoRunWatchdogLastLogEntry || null;
+  return {
+    lastLogEntry,
+    error: new Error(buildAutoRunLogSilenceErrorMessage({
+      timeoutMs: context.timeoutMs || AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+      lastLogMessage: lastLogEntry?.message || '',
+      lastLogLevel: lastLogEntry?.level || '',
+      lastLogTimestamp: lastLogEntry?.timestamp || 0,
+      now: Date.now(),
+    })),
+  };
+}
+
+async function finalizePersistentAutoRunPauseWatchdogTimeout(error, state = {}, context = {}, lastLogEntry = null) {
+  await clearPersistentAutoRunPauseWatchdog();
+  resetAutoRunWatchdog({ preserveLastLog: true });
+  cancelPendingCommands();
+  if (webNavListener) {
+    chrome.webNavigation.onBeforeNavigate.removeListener(webNavListener);
+    webNavListener = null;
+  }
+
+  const currentRun = context.currentRun || autoRunCurrentRun || 0;
+  const totalRuns = context.totalRuns === Number.POSITIVE_INFINITY
+    ? Number.POSITIVE_INFINITY
+    : (context.totalRuns || autoRunTotalRuns || sanitizeAutoRunCount(state.autoRunCount));
+  const infiniteMode = Boolean(context.infiniteMode);
+
+  autoRunActive = false;
+  autoRunCurrentRun = currentRun;
+  autoRunTotalRuns = totalRuns;
+  autoRunInfinite = infiniteMode;
+
+  for (const waiter of stepWaiters.values()) {
+    waiter.reject(new Error(STOP_ERROR_MESSAGE));
+  }
+  stepWaiters.clear();
+  resumeWaiter = null;
+
+  await setState({ autoRunning: false, currentRunStep: 0 });
+  const failureRecord = await recordVisibleAutoRunFailure(error.message, {
+    currentRun,
+    totalRuns,
+    infiniteMode,
+    lastLogEntry,
+  });
+  await addLog(failureRecord.logMessage, 'error');
+
+  const shouldContinueAfterWatchdog = shouldContinueAutoRunAfterWatchdog({
+    currentRun,
+    totalRuns,
+    infiniteMode,
+  });
+
+  if (shouldContinueAfterWatchdog) {
+    clearStopRequest();
+    await addLog(`=== Run ${failureRecord.runLabel} watchdog timeout. Starting next run automatically... ===`, 'warn');
+    sendAutoRunStatus('running', { currentRun });
+    startAutoRunLoop(
+      sanitizeAutoRunCount(state.autoRunCount),
+      infiniteMode,
+      {
+        preserveStats: true,
+        startingRun: currentRun + 1,
+      }
+    );
+    return;
+  }
+
+  sendAutoRunStatus('stopped', {
+    currentRun,
+    totalRuns,
+    infiniteMode,
+    summaryMessage: failureRecord.logMessage,
+  });
+}
+
 function clearAutoRunWatchdogTimer() {
   if (autoRunWatchdogTimer) {
     clearTimeout(autoRunWatchdogTimer);
@@ -2465,6 +2624,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
   manualHandoffRunContext = null;
   autoRunCurrentRunStartedAt = 0;
   resetAutoRunCurrentSuccessMode();
+  await clearPersistentAutoRunPauseWatchdog();
   startAutoRunWatchdog();
   await ensureAutoRunStatsLoaded();
   if (!preserveStats) {
@@ -2584,12 +2744,28 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
           phase: 'waiting_email',
           infiniteMode: autoRunInfinite,
         });
+        const shouldUsePersistentPauseWatchdog = shouldUsePersistentAutoRunPauseWatchdog({
+          phase: 'waiting_email',
+          infiniteMode: autoRunInfinite,
+        });
         const resumePromise = waitForResume();
-        if (shouldSuspendWatchdogDuringPause) {
+        if (shouldSuspendWatchdogDuringPause || shouldUsePersistentPauseWatchdog) {
           suspendAutoRunWatchdog();
+          if (shouldUsePersistentPauseWatchdog) {
+            await armPersistentAutoRunPauseWatchdog({
+              phase: 'waiting_email',
+              currentRun: run,
+              totalRuns: autoRunTotalRuns,
+              infiniteMode: autoRunInfinite,
+              timeoutMs: AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+            });
+          }
           try {
             await resumePromise;
           } finally {
+            if (shouldUsePersistentPauseWatchdog) {
+              await clearPersistentAutoRunPauseWatchdog();
+            }
             resumeAutoRunWatchdog({ resetActivity: true });
           }
         } else {
@@ -3124,9 +3300,11 @@ async function ensureSignupPageReadyForVerification(state, step = 4) {
   const start = Date.now();
   const timeoutMs = 10000;
   let refreshedOauthAfterTimeout = false;
+  let lastPageState = null;
 
   while (Date.now() - start < timeoutMs) {
     const pageState = await getSignupAuthPageState();
+    lastPageState = pageState;
 
     if (pageState?.hasAuthOperationTimedOut) {
       if (refreshedOauthAfterTimeout) {
