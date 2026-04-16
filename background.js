@@ -2963,14 +2963,11 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
       autoRunCurrentRunStartedAt = runStartedAt;
       resetAutoRunCurrentSuccessMode();
       throwIfStopped();
-      await addLog(`=== Auto Run ${runTargetText} — Phase 1: Open platform login page ===`, 'info');
-      sendAutoRunStatus('running', { currentRun: run });
-
-      await executeStepAndWait(2, 2000);
-
       const currentState = await getState();
       const currentEmailSource = getCurrentEmailSource(currentState);
-      await addLog(`=== Run ${runTargetText} — Phase 2: Refresh ${getEmailSourceLabel(currentEmailSource)}, then return to fill the platform email field ===`, 'info');
+      await addLog(`=== Auto Run ${runTargetText} — Phase 1: Refresh ${getEmailSourceLabel(currentEmailSource)}, then open the platform login page ===`, 'info');
+      sendAutoRunStatus('running', { currentRun: run });
+
       let emailReady = false;
       try {
         const nextEmail = await fetchEmailAddress({ generateNew: true });
@@ -3027,6 +3024,10 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
           throw new Error('Cannot resume: no email address.');
         }
       }
+
+      await addLog(`=== Run ${runTargetText} — Phase 2: Open platform login page ===`, 'info');
+      sendAutoRunStatus('running', { currentRun: run });
+      await executeStepAndWait(2, 2000);
 
       await addLog(`=== Run ${runTargetText} — Phase 3: Request code, verify, login, complete ===`, 'info');
       sendAutoRunStatus('running', { currentRun: run });

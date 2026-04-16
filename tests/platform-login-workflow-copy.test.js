@@ -7,7 +7,7 @@ function readProjectFile(relativePath) {
   return fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8');
 }
 
-test('background copy reflects the platform-login-first signup flow', () => {
+test('background copy reflects the email-first auto-run flow while keeping the platform login step', () => {
   const backgroundSource = readProjectFile('background.js');
 
   assert.match(
@@ -16,7 +16,11 @@ test('background copy reflects the platform-login-first signup flow', () => {
   );
   assert.match(
     backgroundSource,
-    /Phase 1: Open platform login page/i
+    /Phase 1: Refresh .* then open the platform login page/i
+  );
+  assert.match(
+    backgroundSource,
+    /Phase 2: Open platform login page/i
   );
   assert.match(
     backgroundSource,
@@ -32,7 +36,7 @@ test('background copy reflects the platform-login-first signup flow', () => {
   );
   assert.doesNotMatch(
     backgroundSource,
-    /Phase 1: Open official signup/i
+    /Phase 1: Open platform login page/i
   );
 });
 
