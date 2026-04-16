@@ -44,6 +44,8 @@
     const message = typeof error === 'string' ? error : error?.message || '';
     return /step 3 blocked: openai auth page timed out before credentials could be submitted/i.test(message)
       || /step 3 blocked: auth issue page offered a "return home" recovery link\./i.test(message)
+      || /step 3 failed: auth fatal error page detected before the password input appeared\./i.test(message)
+      || /step 3 failed: auth fatal error page detected after step 3 password submit\./i.test(message)
       || /step 3 failed: could not find email input field on signup page\.\s*url:\s*https:\/\/auth\.openai\.com\/sign-in-with-chatgpt\/[^/\s?#]+\/consent(?:[/?#]\S*)?/i.test(message)
       || /step 3 failed: could not find email input field on signup page\.\s*url:\s*https:\/\/platform\.openai\.com\/signup(?:[/?#]\S*)?/i.test(message)
       || /step 3 failed: could not find passwordless-login button or password input after submitting email\.\s*url:\s*https:\/\/(?:auth|accounts)\.openai\.com\/\S+/i.test(message)
@@ -55,6 +57,7 @@
     const message = typeof error === 'string' ? error : error?.message || '';
     return /step 6 failed: could not find email input on login page\.\s*url:\s*https:\/\/(?:auth|accounts)\.openai\.com\/\S+/i.test(message)
       || /step 6 recoverable: auth issue page offered a "return home" recovery link\./i.test(message)
+      || /step 6 failed: auth fatal error page detected after login submit\./i.test(message)
       || /step 6 failed: login did not advance after password submit\. still on the password page\./i.test(message);
   }
 

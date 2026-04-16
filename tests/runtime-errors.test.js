@@ -79,6 +79,14 @@ test('step 3 oauth timeout errors trigger a fresh oauth retry plan', () => {
     true
   );
   assert.equal(
+    shouldRetryStep3WithFreshOauth('Step 3 failed: Auth fatal error page detected before the password input appeared.'),
+    true
+  );
+  assert.equal(
+    shouldRetryStep3WithFreshOauth('Step 3 failed: Auth fatal error page detected after step 3 password submit.'),
+    true
+  );
+  assert.equal(
     shouldRetryStep3WithFreshOauth('Step 3 failed: Could not find email input field on signup page.'),
     false
   );
@@ -125,6 +133,10 @@ test('step 6 auth-page stalls trigger a fresh oauth retry plan', () => {
   );
   assert.equal(
     shouldRetryStep6WithFreshOauth('Step 6 recoverable: auth issue page offered a "return home" recovery link. Refresh the VPS OAuth link and retry with the same email and password.'),
+    true
+  );
+  assert.equal(
+    shouldRetryStep6WithFreshOauth('Step 6 failed: Auth fatal error page detected after login submit.'),
     true
   );
   assert.equal(
