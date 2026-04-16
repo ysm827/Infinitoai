@@ -931,6 +931,31 @@ header {
   cursor: not-allowed;
 }
 
+.domain-table-add-btn {
+  min-width: 36px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--green) 36%, var(--border));
+  border-radius: 999px;
+  background: var(--bg-base);
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.domain-table-add-btn:hover:not(:disabled) {
+  background: var(--green-soft);
+  border-color: var(--green);
+}
+
+.domain-table-add-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent);
+}
+
 .domain-table tbody tr:last-child td {
   border-bottom: none;
 }

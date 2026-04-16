@@ -60,6 +60,7 @@ const tbodyTmailorBlacklist = document.getElementById('tbody-tmailor-blacklist')
 const selectTmailorDomainMode = document.getElementById('select-tmailor-domain-mode');
 const tmailorApiStatus = document.getElementById('tmailor-api-status');
 const btnTmailorApiCode = document.getElementById('btn-tmailor-api-code');
+const btnWhitelistAdd = document.getElementById('btn-whitelist-add');
 const btnWhitelistClearSuccess = document.getElementById('btn-whitelist-clear-success');
 const btnWhitelistClearFailure = document.getElementById('btn-whitelist-clear-failure');
 const btnBlacklistClearSuccess = document.getElementById('btn-blacklist-clear-success');
@@ -103,6 +104,7 @@ const {
   shouldRetryTmailorFetchAfterValidationFailure,
 } = TmailorPasteFeedback;
 const {
+  addTmailorDomainsToWhitelist,
   clearTmailorDomainStats,
   moveTmailorDomainToBlacklist,
   normalizeTmailorDomainState,
@@ -673,6 +675,52 @@ async function moveWhitelistDomainToBlacklist(domain) {
     renderTmailorDomainTables();
     console.error('Failed to move whitelist domain to blacklist:', err);
     showToast(`拉黑失败：${err.message}`, 'error');
+  }
+}
+
+async function promptAndAddWhitelistDomains() {
+  const rawInput = window.prompt('输入要加入白名单的域名，支持多个域名用 , 分隔', '');
+  if (rawInput == null) {
+    return;
+  }
+
+  const rawDomains = String(rawInput || '')
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (rawDomains.length === 0) {
+    showToast('没有可添加的域名', 'warn', 2200);
+    return;
+  }
+
+  const previousState = tmailorDomainState;
+  const nextState = addTmailorDomainsToWhitelist(previousState, rawDomains);
+  if (nextState === previousState) {
+    showToast('这些域名已经都在白名单里了', 'info', 2200);
+    return;
+  }
+
+  const addedDomains = nextState.whitelist.filter((domain) => !previousState.whitelist.includes(domain));
+  tmailorDomainState = nextState;
+  renderTmailorDomainTables();
+
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'SAVE_TMAILOR_DOMAIN_STATE',
+      source: 'sidepanel',
+      payload: {
+        whitelist: nextState.whitelist,
+        blacklist: nextState.blacklist,
+        stats: nextState.stats,
+      },
+    });
+    showToast(`已添加 ${addedDomains.length} 个白名单域名`, 'success', 2400);
+  } catch (err) {
+    tmailorDomainState = previousState;
+    renderTmailorDomainTables();
+    console.error('Failed to add whitelist domains:', err);
+    showToast(`添加白名单失败：${err.message}`, 'error');
   }
 }
 
@@ -1505,6 +1553,12 @@ inputRunInfinite.addEventListener('change', async () => {
 if (selectTmailorDomainMode) {
   selectTmailorDomainMode.addEventListener('change', () => {
     void persistTmailorDomainMode(selectTmailorDomainMode.value);
+  });
+}
+
+if (btnWhitelistAdd) {
+  btnWhitelistAdd.addEventListener('click', () => {
+    void promptAndAddWhitelistDomains();
   });
 }
 

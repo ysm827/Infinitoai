@@ -89,11 +89,27 @@ test('side panel wires TMailor stat-column delete buttons to persist cleared col
 test('side panel renders a blacklist action next to whitelist domains and persists moved state', () => {
   const source = readSidepanelSource();
 
-  assert.match(source, /const \{\s*clearTmailorDomainStats,\s*moveTmailorDomainToBlacklist,/);
+  assert.match(source, /const \{[\s\S]*clearTmailorDomainStats,\s*moveTmailorDomainToBlacklist,/);
   assert.match(source, /async function moveWhitelistDomainToBlacklist\(domain\) \{/);
   assert.match(source, /payload: \{\s*whitelist: nextState\.whitelist,\s*blacklist: nextState\.blacklist,\s*stats: nextState\.stats,\s*\}/);
   assert.match(source, /data-domain-action="blacklist"/);
   assert.match(source, /class="domain-row-action-btn"/);
   assert.match(source, /tbodyTmailorWhitelist\.addEventListener\('click', async \(event\) => \{/);
   assert.match(source, /await moveWhitelistDomainToBlacklist\(button\.dataset\.domain \|\| ''\);/);
+});
+
+test('side panel exposes a whitelist add button in the domain header and persists comma-separated additions', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'sidepanel', 'sidepanel.html'), 'utf8');
+  const source = readSidepanelSource();
+
+  assert.match(html, /id="btn-whitelist-add"/);
+  assert.match(html, /<th>[\s\S]*域名[\s\S]*id="btn-whitelist-add"/);
+  assert.match(source, /const btnWhitelistAdd = document\.getElementById\('btn-whitelist-add'\);/);
+  assert.match(source, /const \{\s*addTmailorDomainsToWhitelist,\s*clearTmailorDomainStats,/);
+  assert.match(source, /async function promptAndAddWhitelistDomains\(\) \{/);
+  assert.match(source, /window\.prompt\('输入要加入白名单的域名，支持多个域名用 , 分隔',\s*''\)/);
+  assert.match(source, /\.split\(\/\[,，\]\/\)/);
+  assert.match(source, /addTmailorDomainsToWhitelist\(previousState,\s*rawDomains\)/);
+  assert.match(source, /payload:\s*\{[\s\S]*whitelist:\s*nextState\.whitelist,[\s\S]*blacklist:\s*nextState\.blacklist,[\s\S]*stats:\s*nextState\.stats[\s\S]*\}/);
+  assert.match(source, /btnWhitelistAdd\.addEventListener\('click',\s*\(\)\s*=>\s*\{[\s\S]*promptAndAddWhitelistDomains\(\)/);
 });
