@@ -103,6 +103,10 @@ test('step 3 platform-login stall errors trigger the dedicated platform refresh 
     true
   );
   assert.equal(
+    shouldRetryStep3WithPlatformLoginRefresh('Step 3 failed: current auth page is not on the signup flow yet. URL: https://platform.openai.com/login'),
+    true
+  );
+  assert.equal(
     shouldRetryStep3WithPlatformLoginRefresh('Step 3 failed: Could not find passwordless-login button or password input after submitting email. URL: https://auth.openai.com/u/login/password'),
     false
   );

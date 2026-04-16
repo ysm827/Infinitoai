@@ -1371,7 +1371,9 @@ async function broadcastStopToContentScripts() {
 }
 
 let stopRequested = false;
-let contentFlowControlSequence = 0;
+// Seed control messages from a time-based baseline so content scripts can
+// clear stale STOP_FLOW state even if the background worker restarted.
+let contentFlowControlSequence = Date.now() * 1000;
 
 function attachContentFlowControlSequence(message = {}) {
   if (!message || typeof message !== 'object') {
@@ -3003,6 +3005,9 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
         await addLog(`=== Run ${runTargetText} — ${getEmailSourceLabel(currentEmailSource)} ready: ${nextEmail} ===`, 'ok');
         emailReady = true;
       } catch (err) {
+        if (isStopError(err)) {
+          throw err;
+        }
         await addLog(`${getEmailSourceLabel(currentEmailSource)} auto-fetch failed: ${err.message}`, 'warn');
       }
 
@@ -3241,6 +3246,7 @@ function isStep2PlatformSigningBridgePageState(pageState = {}) {
 
 async function executeStep2(state, options = {}) {
   const replayedAfterNavigationInterrupt = Boolean(options?.replayedAfterNavigationInterrupt);
+  const preferSignupEntry = Boolean(options?.preferSignupEntry);
   if (!replayedAfterNavigationInterrupt) {
     step2NavigationReplayAttempted = false;
   }
@@ -3263,7 +3269,9 @@ async function executeStep2(state, options = {}) {
       type: 'EXECUTE_STEP',
       step: 2,
       source: 'background',
-      payload: {},
+      payload: {
+        preferSignupEntry,
+      },
     });
   } catch (err) {
     const errorMessage = err?.message || String(err || '');
@@ -3453,7 +3461,11 @@ async function waitForStep3CompletionSignalOrRecoveredAuthState() {
       return;
     }
 
-    if (pageState?.hasVisibleCredentialInput && isExistingAccountLoginPasswordPageUrl(pageState?.url)) {
+    if (
+      pageState?.hasVisibleCredentialInput
+      && isExistingAccountLoginPasswordPageUrl(pageState?.url)
+      && !pageState?.hasVisibleSignupRegistrationChoice
+    ) {
       const payload = {
         recoveredAfterNavigation: true,
         existingAccountLogin: true,
@@ -3674,6 +3686,22 @@ async function pollVerificationCodeFromMail(step, mail, payload) {
         }
       }
     }
+  }
+
+  if (result?.error) {
+    throw new Error(result.error);
+  }
+
+  if (result?.recovery === 'reload_mailbox') {
+    await addLog(`Step ${step}: Mailbox page requested a background reload (${result.reason || 'reload_mailbox'}). Reopening mailbox and retrying once...`, 'warn');
+    await reviveMailTab(mail);
+    await sleepWithStop(1200);
+    result = await sendToContentScript(mail.source, {
+      type: 'POLL_EMAIL',
+      step,
+      source: 'background',
+      payload,
+    });
   }
 
   if (result?.error) {
@@ -3974,19 +4002,47 @@ async function getSignupAuthPageState() {
       source: 'background',
       payload: {},
     });
-    return pageState || {
+    if (pageState) {
+      return {
+        isReachable: true,
+        requiresPhoneVerification: false,
+        hasUnsupportedEmail: false,
+        hasFatalError: false,
+        hasAuthOperationTimedOut: false,
+        hasVisibleCredentialInput: false,
+        hasVisibleSignupRegistrationChoice: false,
+        hasVisibleVerificationInput: false,
+        hasVisibleProfileFormInput: false,
+        hasReadyVerificationPage: false,
+        hasReadyProfilePage: false,
+        ...pageState,
+      };
+    }
+
+    const fallbackState = await getSignupPageFallbackAuthState();
+    if (fallbackState) {
+      return fallbackState;
+    }
+
+    return {
       isReachable: true,
       requiresPhoneVerification: false,
       hasUnsupportedEmail: false,
       hasFatalError: false,
       hasAuthOperationTimedOut: false,
       hasVisibleCredentialInput: false,
+      hasVisibleSignupRegistrationChoice: false,
       hasVisibleVerificationInput: false,
       hasVisibleProfileFormInput: false,
       hasReadyVerificationPage: false,
       hasReadyProfilePage: false,
     };
   } catch {
+    const fallbackState = await getSignupPageFallbackAuthState();
+    if (fallbackState) {
+      return fallbackState;
+    }
+
     return {
       isReachable: false,
       requiresPhoneVerification: false,
@@ -3994,6 +4050,7 @@ async function getSignupAuthPageState() {
       hasFatalError: false,
       hasAuthOperationTimedOut: false,
       hasVisibleCredentialInput: false,
+      hasVisibleSignupRegistrationChoice: false,
       hasVisibleVerificationInput: false,
       hasVisibleProfileFormInput: false,
       hasReadyVerificationPage: false,
@@ -4002,11 +4059,61 @@ async function getSignupAuthPageState() {
   }
 }
 
+function isStableStep5SuccessUrl(url = '') {
+  const normalizedUrl = String(url || '').trim();
+  if (!normalizedUrl) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(normalizedUrl);
+    if (parsed.hostname !== 'platform.openai.com') {
+      return false;
+    }
+
+    if (/^\/auth\/callback$/i.test(parsed.pathname)) {
+      return true;
+    }
+
+    return /^\/welcome$/i.test(parsed.pathname) && parsed.searchParams.get('step') === 'create';
+  } catch {
+    return /platform\.openai\.com\/auth\/callback/i.test(normalizedUrl)
+      || /platform\.openai\.com\/welcome\?step=create/i.test(normalizedUrl);
+  }
+}
+
+async function getSignupPageFallbackAuthState() {
+  const signupTabId = await getTabId('signup-page');
+  if (!signupTabId) {
+    return null;
+  }
+
+  const signupTab = await chrome.tabs.get(signupTabId).catch(() => null);
+  if (!isStableStep5SuccessUrl(signupTab?.url)) {
+    return null;
+  }
+
+  return {
+    isReachable: true,
+    requiresPhoneVerification: false,
+    hasUnsupportedEmail: false,
+    hasFatalError: false,
+    hasAuthOperationTimedOut: false,
+    hasVisibleCredentialInput: false,
+    hasVisibleSignupRegistrationChoice: false,
+    hasVisibleVerificationInput: false,
+    hasVisibleProfileFormInput: false,
+    hasReadyVerificationPage: false,
+    hasReadyProfilePage: false,
+    url: signupTab.url,
+  };
+}
+
 function isCanonicalAboutYouUrl(url = '') {
   return /(?:auth|accounts)\.openai\.com\/about-you/i.test(String(url || ''));
 }
 
-async function waitForStep5AuthStateToSettle(timeoutMs = 8000) {
+async function waitForStep5AuthStateToSettle(timeoutMs = 12000) {
   const start = Date.now();
   let lastPageState = null;
 
@@ -4029,6 +4136,7 @@ async function waitForStep5AuthStateToSettle(timeoutMs = 8000) {
     hasFatalError: false,
     hasAuthOperationTimedOut: false,
     hasVisibleCredentialInput: false,
+    hasVisibleSignupRegistrationChoice: false,
     hasVisibleVerificationInput: false,
     hasVisibleProfileFormInput: false,
     hasReadyVerificationPage: false,
@@ -4436,7 +4544,7 @@ async function recoverStep3PlatformLogin(error, options = {}) {
   );
 
   const waitForSignupPage = waitForStepComplete(2, 120000);
-  await executeStep2(state);
+  await executeStep2(state, { preferSignupEntry: true });
   await waitForSignupPage;
 }
 

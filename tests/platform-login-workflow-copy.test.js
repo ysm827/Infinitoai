@@ -172,11 +172,11 @@ test('signup auth page state distinguishes an unreachable tab from a real non-re
 
   assert.match(
     backgroundSource,
-    /return pageState \|\| \{[\s\S]*isReachable:\s*true[\s\S]*\};/i
+    /async function getSignupAuthPageState\(\) \{[\s\S]*if \(pageState\) \{[\s\S]*isReachable:\s*true[\s\S]*\.\.\.pageState[\s\S]*\}/i
   );
   assert.match(
     backgroundSource,
-    /catch \{[\s\S]*isReachable:\s*false[\s\S]*\}/i
+    /catch \{[\s\S]*const fallbackState = await getSignupPageFallbackAuthState\(\);[\s\S]*if \(fallbackState\) \{[\s\S]*return fallbackState;[\s\S]*\}[\s\S]*isReachable:\s*false[\s\S]*\}/i
   );
 });
 
@@ -197,7 +197,7 @@ test('step 3 keeps waiting for completion when the signup auth page enters bfcac
   );
   assert.match(
     backgroundSource,
-    /const payload = \{[\s\S]*recoveredAfterNavigation:\s*true,[\s\S]*existingAccountLogin:\s*true[\s\S]*\};[\s\S]*Existing-account login password page is already visible after the navigation interrupt[\s\S]*notifyStepComplete\(3,\s*payload\)/i
+    /pageState\?\.hasVisibleCredentialInput[\s\S]*isExistingAccountLoginPasswordPageUrl\(pageState\?\.url\)[\s\S]*!\s*pageState\?\.hasVisibleSignupRegistrationChoice[\s\S]*const payload = \{[\s\S]*recoveredAfterNavigation:\s*true,[\s\S]*existingAccountLogin:\s*true[\s\S]*\};[\s\S]*Existing-account login password page is already visible after the navigation interrupt[\s\S]*notifyStepComplete\(3,\s*payload\)/i
   );
 });
 
@@ -225,6 +225,15 @@ test('step 3 retries platform-login stalls up to three times before failing the 
   assert.match(
     backgroundSource,
     /if \(step === 3 && recoveredStep3PlatformLoginRefreshCount < 3 && shouldRetryStep3WithPlatformLoginRefresh\(err\)\)[\s\S]*return await executeStepAndWait\(step,\s*delayAfter,\s*\{[\s\S]*step3PlatformLoginRefreshCount:\s*recoveredStep3PlatformLoginRefreshCount \+ 1[\s\S]*\}\);/i
+  );
+});
+
+test('step 3 recovery reopens step 2 in signup-entry mode before retrying credentials', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function recoverStep3PlatformLogin\(error,\s*options = \{\}\) \{[\s\S]*await executeStep2\(state,\s*\{[\s\S]*preferSignupEntry:\s*true[\s\S]*\}\);/i
   );
 });
 
@@ -358,11 +367,11 @@ test('step 5 completion is revalidated against the live auth page before the bac
 
   assert.match(
     backgroundSource,
-    /async function waitForStep5AuthStateToSettle\(timeoutMs = 8000\) \{/i
+    /async function waitForStep5AuthStateToSettle\(timeoutMs = 12000\) \{/i
   );
   assert.match(
     backgroundSource,
-    /waitForStep5AuthStateToSettle\(timeoutMs = 8000\) \{[\s\S]*if \(pageState\?\.isReachable === false\)[\s\S]*await sleepWithStop\(250\);[\s\S]*continue;/i
+    /waitForStep5AuthStateToSettle\(timeoutMs = 12000\) \{[\s\S]*if \(pageState\?\.isReachable === false\)[\s\S]*await sleepWithStop\(250\);[\s\S]*continue;/i
   );
   assert.match(
     backgroundSource,
@@ -375,6 +384,27 @@ test('step 5 completion is revalidated against the live auth page before the bac
   assert.match(
     backgroundSource,
     /validateStep5CompletionBeforeAcceptingSuccess\(payload = \{\}\) \{[\s\S]*const pageState = await waitForStep5AuthStateToSettle\(\);[\s\S]*pageState\?\.hasUnsupportedEmail[\s\S]*pageState\?\.hasReadyProfilePage[\s\S]*pageState\?\.hasVisibleProfileFormInput/i
+  );
+});
+
+test('step 5 background validation treats the platform welcome landing page as a successful fallback when the content script is temporarily unreachable', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /function isStableStep5SuccessUrl\(url = ''\) \{[\s\S]*parsed\.hostname !== 'platform\.openai\.com'/i
+  );
+  assert.match(
+    backgroundSource,
+    /function isStableStep5SuccessUrl\(url = ''\) \{[\s\S]*parsed\.searchParams\.get\('step'\) === 'create'/i
+  );
+  assert.match(
+    backgroundSource,
+    /async function getSignupPageFallbackAuthState\(\) \{[\s\S]*const signupTabId = await getTabId\('signup-page'\);[\s\S]*const signupTab = await chrome\.tabs\.get\(signupTabId\)\.catch\(\(\) => null\);[\s\S]*if \(!isStableStep5SuccessUrl\(signupTab\?\.url\)\) \{[\s\S]*return null;[\s\S]*\}[\s\S]*isReachable:\s*true[\s\S]*url:\s*signupTab\.url/i
+  );
+  assert.match(
+    backgroundSource,
+    /async function getSignupAuthPageState\(\) \{[\s\S]*catch \{[\s\S]*const fallbackState = await getSignupPageFallbackAuthState\(\);[\s\S]*if \(fallbackState\) \{[\s\S]*return fallbackState;[\s\S]*\}[\s\S]*return \{[\s\S]*isReachable:\s*false/i
   );
 });
 
@@ -410,6 +440,24 @@ test('stopping auto-run prevents step 1 from continuing into TMailor fallback wo
   assert.match(
     backgroundSource,
     /async function fetchTmailorEmail\(options = \{\}\) \{[\s\S]*await addLog\('TMailor: Requesting a new mailbox via API\.\.\.',\s*'info'\);[\s\S]*catch \(err\) \{[\s\S]*\}[\s\S]*throwIfStopped\(\);[\s\S]*await addLog\(`TMailor: Opening mailbox page \(\$\{generateNew \? 'generate new' : 'reuse current'\}\)\.\.\.`\);/i
+  );
+});
+
+test('auto run phase 1 rethrows stop requests instead of downgrading them into waiting-email pauses', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /let emailReady = false;[\s\S]*try \{[\s\S]*const nextEmail = await fetchEmailAddress\(\{ generateNew: true \}\);[\s\S]*\} catch \(err\) \{[\s\S]*if \(isStopError\(err\)\) \{\s*throw err;\s*\}[\s\S]*auto-fetch failed: \$\{err\.message\}/i
+  );
+});
+
+test('background seeds content flow control sequences from a time-based baseline so fresh commands survive worker restarts', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /let contentFlowControlSequence = Date\.now\(\)\s*\*\s*1000;/i
   );
 });
 

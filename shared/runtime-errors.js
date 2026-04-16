@@ -37,7 +37,8 @@
   function shouldRetryStep3WithPlatformLoginRefresh(error) {
     const message = typeof error === 'string' ? error : error?.message || '';
     return /step 3 failed: could not find passwordless-login button or password input after submitting email\.\s*url:\s*https:\/\/platform\.openai\.com\/login(?:[/?#]\S*)?/i.test(message)
-      || /step 3 failed: could not find email input field on signup page\.\s*url:\s*https:\/\/platform\.openai\.com\/login(?:[/?#]\S*)?/i.test(message);
+      || /step 3 failed: could not find email input field on signup page\.\s*url:\s*https:\/\/platform\.openai\.com\/login(?:[/?#]\S*)?/i.test(message)
+      || /step 3 failed: current auth page is not on the signup flow yet\.\s*url:\s*https:\/\/platform\.openai\.com\/login(?:[/?#]\S*)?/i.test(message);
   }
 
   function shouldRetryStep3WithFreshOauth(error) {
