@@ -622,7 +622,7 @@ async function step3_fillEmailPassword(payload) {
       throw new Error(getAuthReturnHomeRecoveryErrorMessage(3));
     }
     throwIfAuthOperationTimedOut(3);
-    if (isAuthFatalErrorText(getVisiblePageText())) {
+    if (isBlockingAuthFatalError(getVisiblePageText())) {
       throw new Error('Auth fatal error page detected before the email input appeared.');
     }
     throw new Error('Could not find email input field on signup page. URL: ' + location.href);
@@ -679,7 +679,7 @@ async function step3_fillEmailPassword(payload) {
       throw new Error(getAuthReturnHomeRecoveryErrorMessage(3));
     }
     throwIfAuthOperationTimedOut(3);
-    if (isAuthFatalErrorText(getVisiblePageText())) {
+    if (isBlockingAuthFatalError(getVisiblePageText())) {
       throw new Error('Auth fatal error page detected before the password input appeared.');
     }
     throw new Error('Could not find passwordless-login button or password input after submitting email. URL: ' + location.href);
@@ -703,7 +703,7 @@ function isSignupFlowUnexpectedlyOnLoginPasswordPage() {
 }
 
 function throwIfAuthOperationTimedOut(step, text = getVisiblePageText()) {
-  if (isAuthOperationTimedOutText(text)) {
+  if (isBlockingAuthOperationTimedOut(text)) {
     throw new Error(getAuthOperationTimedOutMessage(step));
   }
 }
@@ -773,7 +773,7 @@ async function fillVerificationCode(step, payload) {
     if (step === 7 && /email-verification/i.test(location.href) && isVerificationRetryStateText(visibleText)) {
       throw new Error('Verification page entered retry state before the code input appeared. Restart this run.');
     }
-    if (isAuthFatalErrorText(visibleText)) {
+    if (isBlockingAuthFatalError(visibleText)) {
       throw new Error('Auth fatal error page detected before verification code input appeared.');
     }
     if (step === 7 && isPhoneVerificationRequiredText(visibleText, location.href)) {
@@ -904,10 +904,10 @@ async function waitForVerificationSubmissionOutcome(step, hadRejectedStateBefore
       && hasVisibleProfileInput;
     const hasVisibleVerificationInputNow = hasVisibleVerificationInput();
     const hasVisibleInput = hasActiveVerificationInput();
-    if (isAuthFatalErrorText(visibleText)) {
+    if (isBlockingAuthFatalError(visibleText)) {
       throw new Error('Auth fatal error page detected after verification submit.');
     }
-    if (isUnsupportedEmailBlockingStep(step) && isUnsupportedEmailText(visibleText)) {
+    if (isUnsupportedEmailBlockingStep(step) && isUnsupportedEmailText(visibleText, location.href)) {
       throw new Error(getUnsupportedEmailBlockedMessage(step));
     }
     if (step === 7 && isPhoneVerificationRequiredText(visibleText, location.href)) {
@@ -1008,10 +1008,51 @@ function hasReadyProfilePage(text = getVisiblePageText()) {
     && !hasVerificationContextText(text);
 }
 
+function getVisibleButtonLikeElements() {
+  const candidates = [];
+  const seen = new Set();
+  const selectors = [
+    'button[type="submit"][data-dd-action-name="Continue"]',
+    'button[type="submit"]._primary_3rdp0_107',
+    'button[type="submit"]',
+    'input[type="submit"]',
+  ];
+
+  for (const selector of selectors) {
+    const match = document.querySelector(selector);
+    if (match && !seen.has(match) && isElementVisible(match)) {
+      seen.add(match);
+      candidates.push(match);
+    }
+  }
+
+  for (const element of Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]'))) {
+    if (!seen.has(element) && isElementVisible(element)) {
+      seen.add(element);
+      candidates.push(element);
+    }
+  }
+
+  return candidates;
+}
+
+function hasVisibleContinueLikeAction() {
+  return getVisibleButtonLikeElements().some((button) => {
+    const text = String(button.textContent || button.value || '').trim();
+    return /继续|continue/i.test(text);
+  });
+}
+
 function hasVisibleOauthConsentContinueButton(text = getVisiblePageText()) {
-  const selectorMatch = Array.from(
-    document.querySelectorAll('button[type="submit"][data-dd-action-name="Continue"], button[type="submit"]._primary_3rdp0_107')
-  ).some(isElementVisible);
+  const selectorMatch = getVisibleButtonLikeElements().some((button) => {
+    if (!button) {
+      return false;
+    }
+
+    const actionName = String(button.getAttribute?.('data-dd-action-name') || '');
+    const className = String(button.className || '');
+    return actionName === 'Continue' || /\b_primary_3rdp0_107\b/.test(className);
+  });
   if (selectorMatch) {
     return true;
   }
@@ -1020,9 +1061,7 @@ function hasVisibleOauthConsentContinueButton(text = getVisiblePageText()) {
     return false;
   }
 
-  return Array.from(document.querySelectorAll('button, [role="button"]')).some(
-    (button) => isElementVisible(button) && /继续|Continue/i.test(String(button.textContent || '').trim())
-  );
+  return hasVisibleContinueLikeAction();
 }
 
 function hasStableNextPageAfterProfileSubmit(text = getVisiblePageText()) {
@@ -1035,10 +1074,10 @@ function hasStableNextPageAfterProfileSubmit(text = getVisiblePageText()) {
 function getAuthPageState() {
   const visibleText = getVisiblePageText();
   return {
-    hasAuthOperationTimedOut: isAuthOperationTimedOutText(visibleText),
-    hasFatalError: isAuthFatalErrorText(visibleText),
+    hasAuthOperationTimedOut: isBlockingAuthOperationTimedOut(visibleText),
+    hasFatalError: isBlockingAuthFatalError(visibleText),
     requiresPhoneVerification: isPhoneVerificationRequiredText(visibleText, location.href),
-    hasUnsupportedEmail: isUnsupportedEmailText(visibleText),
+    hasUnsupportedEmail: isUnsupportedEmailText(visibleText, location.href),
     hasVisibleCredentialInput: hasVisibleCredentialInput(),
     hasVisibleVerificationInput: hasVisibleVerificationInput(),
     hasVisibleProfileFormInput: hasVisibleProfileFormInput(),
@@ -1050,6 +1089,26 @@ function getAuthPageState() {
 
 function hasVisibleCredentialInput() {
   return CREDENTIAL_INPUT_SELECTORS.some((selector) => Array.from(document.querySelectorAll(selector)).some(isElementVisible));
+}
+
+function hasActionableAuthForm() {
+  return hasVisibleCredentialInput() || hasVisibleVerificationInput() || hasVisibleProfileFormInput();
+}
+
+function isBlockingAuthOperationTimedOut(text = getVisiblePageText()) {
+  return isAuthOperationTimedOutText(text) && !hasActionableAuthForm();
+}
+
+function isBlockingAuthFatalError(text = getVisiblePageText()) {
+  if (!isAuthFatalErrorText(text)) {
+    return false;
+  }
+
+  if (isAuthOperationTimedOutText(text) && hasActionableAuthForm()) {
+    return false;
+  }
+
+  return true;
 }
 
 function hasVisibleVerificationInput() {
@@ -1105,10 +1164,10 @@ async function waitForProfileSubmissionOutcome(step, timeout = 7000) {
     const visibleText = getVisiblePageText();
     const hasRawProfileInput = hasVisibleProfileFormInput();
     const onReadyProfilePage = hasReadyProfilePage(visibleText);
-    if (isUnsupportedEmailBlockingStep(step) && isUnsupportedEmailText(visibleText)) {
+    if (isUnsupportedEmailBlockingStep(step) && isUnsupportedEmailText(visibleText, location.href)) {
       throw new Error(getUnsupportedEmailBlockedMessage(step));
     }
-    if (isAuthFatalErrorText(visibleText)) {
+    if (isBlockingAuthFatalError(visibleText)) {
       throw new Error('Auth fatal error page detected after profile submit.');
     }
 
@@ -1138,6 +1197,40 @@ async function waitForProfileSubmissionOutcome(step, timeout = 7000) {
       }
     } else if (onReadyProfilePage || hasRawProfileInput || hasProfileContextText(visibleText)) {
       nonProfileStateSince = 0;
+    }
+
+    await sleep(250);
+  }
+
+  throw new Error(`Step ${step} blocked: profile submit did not reach a stable next page. URL: ${location.href}`);
+}
+
+function shouldWaitForPostProfileBlockingSettle(outcome = {}) {
+  const reason = String(outcome?.reason || '').trim().toLowerCase();
+  return reason === 'profile-form-hidden-stable' || reason === 'no-rejection-detected';
+}
+
+async function waitForPostProfileBlockingSettle(step, startUrl = location.href, timeout = 5000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const visibleText = getVisiblePageText();
+    if (isUnsupportedEmailBlockingStep(step) && isUnsupportedEmailText(visibleText, location.href)) {
+      throw new Error(getUnsupportedEmailBlockedMessage(step));
+    }
+    if (isBlockingAuthFatalError(visibleText)) {
+      throw new Error('Auth fatal error page detected after profile submit.');
+    }
+    if (location.href !== startUrl) {
+      return;
+    }
+    if (hasStableNextPageAfterProfileSubmit(visibleText)) {
+      return;
+    }
+    if (!isCanonicalAboutYouPage(startUrl) && !hasVisibleProfileFormInput() && !hasProfileContextText(visibleText)) {
+      return;
     }
 
     await sleep(250);
@@ -1317,13 +1410,13 @@ async function waitForStep3CredentialSubmissionOutcome(startUrl, timeout = 8000)
       throw new Error(getAuthReturnHomeRecoveryErrorMessage(3));
     }
     throwIfAuthOperationTimedOut(3, visibleText);
-    if (isAuthFatalErrorText(visibleText)) {
+    if (isBlockingAuthFatalError(visibleText)) {
       throw new Error('Auth fatal error page detected after step 3 password submit.');
     }
     if (isPhoneVerificationRequiredText(visibleText, location.href)) {
       throw new Error(getPhoneVerificationBlockedMessage(3));
     }
-    if (isUnsupportedEmailBlockingStep(3) && isUnsupportedEmailText(visibleText)) {
+    if (isUnsupportedEmailBlockingStep(3) && isUnsupportedEmailText(visibleText, location.href)) {
       throw new Error(getUnsupportedEmailBlockedMessage(3));
     }
 
@@ -1431,7 +1524,7 @@ async function waitForLoginSubmissionOutcome(timeout = 12000) {
     if (await handleAuthReturnHomeRecovery(6, visibleText)) {
       throw new Error(getAuthReturnHomeRecoveryErrorMessage(6));
     }
-    if (isAuthFatalErrorText(visibleText)) {
+    if (isBlockingAuthFatalError(visibleText)) {
       log(
         `Step 6: Fatal auth state after login submit. URL: ${location.href}; Visible text snapshot: ${summarizeVisibleTextForLog(visibleText) || '(empty)'}`,
         'warn'
@@ -1821,9 +1914,13 @@ async function step5_fillNameBirthday(payload) {
 
   if (completeBtn) {
     await humanPause(500, 1300);
+    const profileSubmitStartUrl = location.href;
     simulateClick(completeBtn);
     log('Step 5: Clicked "完成帐户创建"');
-    await waitForProfileSubmissionOutcome(5);
+    const submitOutcome = await waitForProfileSubmissionOutcome(5);
+    if (shouldWaitForPostProfileBlockingSettle(submitOutcome)) {
+      await waitForPostProfileBlockingSettle(5, profileSubmitStartUrl);
+    }
   }
 
   reportComplete(5);

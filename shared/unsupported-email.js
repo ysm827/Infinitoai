@@ -22,8 +22,14 @@
     return (value || '').replace(/\s+/g, ' ').trim();
   }
 
-  function isUnsupportedEmailText(text) {
+  function isUnsupportedEmailText(text, url = '') {
     const normalized = normalizeText(text);
+    const normalizedUrl = normalizeText(url).toLowerCase();
+
+    if (/(?:auth|accounts)\.openai\.com\/unsupported(?:-|_)email(?:[/?#]|$)/i.test(normalizedUrl)) {
+      return true;
+    }
+
     if (!normalized) {
       return false;
     }

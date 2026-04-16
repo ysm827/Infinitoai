@@ -14,9 +14,21 @@ test('detects unsupported email copy in Chinese and English', () => {
   assert.equal(isUnsupportedEmailText('验证过程中出错 (unsupported_email)。请重试。'), true);
 });
 
+test('detects unsupported-email auth urls even before the page copy settles', () => {
+  assert.equal(
+    isUnsupportedEmailText('', 'https://auth.openai.com/unsupported-email'),
+    true
+  );
+  assert.equal(
+    isUnsupportedEmailText('', 'https://accounts.openai.com/unsupported_email?from=about-you'),
+    true
+  );
+});
+
 test('ignores unrelated auth text for unsupported email detector', () => {
   assert.equal(isUnsupportedEmailText('电话号码是必填项'), false);
   assert.equal(isUnsupportedEmailText('Your ChatGPT code is 281878'), false);
+  assert.equal(isUnsupportedEmailText('', 'https://auth.openai.com/about-you'), false);
 });
 
 test('unsupported email only blocks the post-profile step', () => {

@@ -2060,6 +2060,93 @@ test('step 3 reports an auth timeout page instead of a missing email field when 
   ]);
 });
 
+test('step 3 keeps filling the credential form when stale timeout copy is visible but the inputs are still actionable', async () => {
+  const emailInput = {
+    getBoundingClientRect() {
+      return { width: 220, height: 42 };
+    },
+  };
+  const passwordInput = {
+    getBoundingClientRect() {
+      return { width: 220, height: 42 };
+    },
+  };
+  const continueButton = {
+    textContent: '继续',
+    getBoundingClientRect() {
+      return { width: 240, height: 48 };
+    },
+  };
+
+  const filledValues = [];
+  const clickedTargets = [];
+
+  const context = createContext({
+    href: 'https://platform.openai.com/login',
+    bodyText: '糟糕，出错了！ Operation timed out 创建密码 继续',
+    waitForElementImpl(selector) {
+      if (selector.includes('type="email"') || selector.includes('name="email"')) {
+        return Promise.resolve(emailInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'button[type="submit"]') {
+        return continueButton;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[type="password"]') {
+        return [passwordInput];
+      }
+      return [];
+    },
+  });
+  context.AuthFatalErrors = AuthFatalErrors;
+  context.fillInput = (_target, value) => {
+    filledValues.push(value);
+  };
+  context.simulateClick = (target) => {
+    clickedTargets.push(target);
+    if (target === continueButton) {
+      context.location.href = 'https://auth.openai.com/email-verification';
+      context.document.body.innerText = 'Enter verification code';
+    }
+  };
+
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'EXECUTE_STEP', step: 3, payload: { email: 'demo@example.com', password: 'secret-pass' } },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.deepEqual(filledValues, ['demo@example.com', 'secret-pass']);
+  assert.deepEqual(clickedTargets, [continueButton]);
+  assert.deepEqual(context.__errors, []);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.__completions)),
+    [
+      {
+        step: 3,
+        payload: {
+          email: 'demo@example.com',
+        },
+      },
+    ]
+  );
+});
+
 test('auth page state exposes operation timeout pages before inbox polling begins', async () => {
   const context = createContext({
     href: 'https://auth.openai.com/u/signup/password',
@@ -2083,6 +2170,44 @@ test('auth page state exposes operation timeout pages before inbox polling begin
 
   assert.equal(response?.hasAuthOperationTimedOut, true);
   assert.equal(response?.hasFatalError, true);
+});
+
+test('auth page state ignores stale timeout copy while the credential form is still actionable', async () => {
+  const passwordInput = {
+    getBoundingClientRect() {
+      return { width: 220, height: 42 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://platform.openai.com/login',
+    bodyText: '糟糕，出错了！ Operation timed out 创建密码 继续',
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[type="password"]') {
+        return [passwordInput];
+      }
+      return [];
+    },
+  });
+  context.AuthFatalErrors = AuthFatalErrors;
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'CHECK_AUTH_PAGE_STATE', source: 'background', payload: {} },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 2000);
+  });
+
+  assert.equal(response?.hasVisibleCredentialInput, true);
+  assert.equal(response?.hasAuthOperationTimedOut, false);
+  assert.equal(response?.hasFatalError, false);
 });
 
 test('auth page state reports when signup is still on the credential form', async () => {
@@ -3812,6 +3937,550 @@ test('step 5 succeeds after profile submit when the page reaches the oauth conse
 
   assert.equal(response?.ok, true);
   assert.deepEqual(context.__errors, []);
+  assert.equal(context.__completions.length, 1);
+  assert.equal(context.__completions[0].step, 5);
+});
+
+test('step 5 fails the round when profile submit lands on unsupported-email before the page copy becomes visible', async () => {
+  const UnsupportedEmail = require('../shared/unsupported-email.js');
+  const state = {
+    profileVisible: true,
+  };
+
+  const nameInput = {
+    getBoundingClientRect() {
+      return { width: 240, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const ageInput = {
+    getBoundingClientRect() {
+      return { width: 120, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const submitButton = {
+    textContent: '完成帐户创建',
+    dispatchEvent() {},
+    getBoundingClientRect() {
+      return { width: 140, height: 40 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/about-you',
+    bodyText: '你的年龄是多少？ 全名 年龄 完成帐户创建',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="name"]')) {
+        return Promise.resolve(nameInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'input[name="age"]' && state.profileVisible) {
+        return ageInput;
+      }
+      if (selector === 'button[type="submit"]') {
+        return submitButton;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[name="name"]') {
+        return state.profileVisible ? [nameInput] : [];
+      }
+      if (selector === 'input[name="age"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      if (selector === 'input[inputmode="numeric"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      return [];
+    },
+  });
+  context.UnsupportedEmail = UnsupportedEmail;
+  context.fillInput = () => {};
+  context.simulateClick = () => {
+    state.profileVisible = false;
+    context.location.href = 'https://auth.openai.com/unsupported-email';
+    context.document.body.innerText = '';
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'Logan',
+          lastName: 'Lee',
+          year: 1995,
+          month: 8,
+          day: 21,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(
+    response?.error,
+    'Step 5 blocked: email domain is unsupported on the auth page.'
+  );
+  assert.deepEqual(context.__completions, []);
+  assert.deepEqual(context.__errors, [
+    {
+      step: 5,
+      message: 'Step 5 blocked: email domain is unsupported on the auth page.',
+    },
+  ]);
+});
+
+test('step 5 does not report success when unsupported_email appears shortly after the profile form disappears on about-you', async () => {
+  let fakeNow = 0;
+  const UnsupportedEmail = require('../shared/unsupported-email.js');
+  const state = {
+    profileVisible: true,
+    errorVisible: false,
+    clickAt: null,
+  };
+
+  const nameInput = {
+    getBoundingClientRect() {
+      return { width: 240, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const ageInput = {
+    getBoundingClientRect() {
+      return { width: 120, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const submitButton = {
+    textContent: '完成帐户创建',
+    dispatchEvent() {},
+    getBoundingClientRect() {
+      return { width: 140, height: 40 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/about-you',
+    bodyText: '你的年龄是多少？ 全名 年龄 完成帐户创建',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="name"]')) {
+        return Promise.resolve(nameInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'input[name="age"]' && state.profileVisible) {
+        return ageInput;
+      }
+      if (selector === 'button[type="submit"]') {
+        return submitButton;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[name="name"]') {
+        return state.profileVisible ? [nameInput] : [];
+      }
+      if (selector === 'input[name="age"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      if (selector === 'input[inputmode="numeric"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      return [];
+    },
+  });
+  context.Date = class extends Date {
+    static now() {
+      return fakeNow;
+    }
+  };
+  context.UnsupportedEmail = UnsupportedEmail;
+  context.fillInput = () => {};
+  context.sleep = (ms = 0) => {
+    fakeNow += Math.max(1, Number(ms) || 0);
+    if (!state.errorVisible && state.clickAt != null && fakeNow - state.clickAt >= 2200) {
+      state.errorVisible = true;
+      context.document.body.innerText = '糟糕，出错了！ 验证过程中出错 (unsupported_email)。请重试。';
+    }
+    return Promise.resolve();
+  };
+  context.simulateClick = () => {
+    state.clickAt = fakeNow;
+    state.profileVisible = false;
+    context.document.body.innerText = '';
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'Logan',
+          lastName: 'Lee',
+          year: 1995,
+          month: 8,
+          day: 21,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(
+    response?.error,
+    'Step 5 blocked: email domain is unsupported on the auth page.'
+  );
+  assert.deepEqual(context.__completions, []);
+  assert.deepEqual(context.__errors, [
+    {
+      step: 5,
+      message: 'Step 5 blocked: email domain is unsupported on the auth page.',
+    },
+  ]);
+});
+
+test('step 5 does not report success when unsupported_email appears several seconds after submit on about-you', async () => {
+  let fakeNow = 0;
+  const UnsupportedEmail = require('../shared/unsupported-email.js');
+  const state = {
+    profileVisible: true,
+    errorVisible: false,
+    clickAt: null,
+  };
+
+  const nameInput = {
+    getBoundingClientRect() {
+      return { width: 240, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const ageInput = {
+    getBoundingClientRect() {
+      return { width: 120, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const submitButton = {
+    textContent: '完成帐户创建',
+    dispatchEvent() {},
+    getBoundingClientRect() {
+      return { width: 140, height: 40 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/about-you',
+    bodyText: '你的年龄是多少？ 全名 年龄 完成帐户创建',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="name"]')) {
+        return Promise.resolve(nameInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'input[name="age"]' && state.profileVisible) {
+        return ageInput;
+      }
+      if (selector === 'button[type="submit"]') {
+        return submitButton;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[name="name"]') {
+        return state.profileVisible ? [nameInput] : [];
+      }
+      if (selector === 'input[name="age"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      if (selector === 'input[inputmode="numeric"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      return [];
+    },
+  });
+  context.Date = class extends Date {
+    static now() {
+      return fakeNow;
+    }
+  };
+  context.UnsupportedEmail = UnsupportedEmail;
+  context.fillInput = () => {};
+  context.sleep = (ms = 0) => {
+    fakeNow += Math.max(1, Number(ms) || 0);
+    if (!state.errorVisible && state.clickAt != null && fakeNow - state.clickAt >= 4200) {
+      state.errorVisible = true;
+      context.document.body.innerText = '糟糕，出错了！ 验证过程中出错 (unsupported_email)。请重试。';
+    }
+    return Promise.resolve();
+  };
+  context.simulateClick = () => {
+    state.clickAt = fakeNow;
+    state.profileVisible = false;
+    context.document.body.innerText = '';
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'Logan',
+          lastName: 'Lee',
+          year: 1995,
+          month: 8,
+          day: 21,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(
+    response?.error,
+    'Step 5 blocked: email domain is unsupported on the auth page.'
+  );
+  assert.deepEqual(context.__completions, []);
+});
+
+test('step 5 does not report success when the page stays blank on about-you after submit', async () => {
+  let fakeNow = 0;
+  const state = {
+    profileVisible: true,
+  };
+
+  const nameInput = {
+    getBoundingClientRect() {
+      return { width: 240, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const ageInput = {
+    getBoundingClientRect() {
+      return { width: 120, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const submitButton = {
+    textContent: '完成帐户创建',
+    dispatchEvent() {},
+    getBoundingClientRect() {
+      return { width: 140, height: 40 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/about-you',
+    bodyText: '你的年龄是多少？ 全名 年龄 完成帐户创建',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="name"]')) {
+        return Promise.resolve(nameInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'input[name="age"]' && state.profileVisible) {
+        return ageInput;
+      }
+      if (selector === 'button[type="submit"]') {
+        return submitButton;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[name="name"]') {
+        return state.profileVisible ? [nameInput] : [];
+      }
+      if (selector === 'input[name="age"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      if (selector === 'input[inputmode="numeric"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      return [];
+    },
+  });
+  context.Date = class extends Date {
+    static now() {
+      return fakeNow;
+    }
+  };
+  context.fillInput = () => {};
+  context.sleep = (ms = 0) => {
+    fakeNow += Math.max(1, Number(ms) || 0);
+    return Promise.resolve();
+  };
+  context.simulateClick = () => {
+    state.profileVisible = false;
+    context.document.body.innerText = '';
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'Logan',
+          lastName: 'Lee',
+          year: 1995,
+          month: 8,
+          day: 21,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.match(response?.error || '', /profile submit did not reach a stable next page/i);
+  assert.deepEqual(context.__completions, []);
+});
+
+test('step 5 succeeds when submit redirects to the platform auth callback url', async () => {
+  const state = {
+    profileVisible: true,
+  };
+
+  const nameInput = {
+    getBoundingClientRect() {
+      return { width: 240, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const ageInput = {
+    getBoundingClientRect() {
+      return { width: 120, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const submitButton = {
+    textContent: '完成帐户创建',
+    dispatchEvent() {},
+    getBoundingClientRect() {
+      return { width: 140, height: 40 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/about-you',
+    bodyText: '你的年龄是多少？ 全名 年龄 完成帐户创建',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="name"]')) {
+        return Promise.resolve(nameInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'input[name="age"]' && state.profileVisible) {
+        return ageInput;
+      }
+      if (selector === 'button[type="submit"]') {
+        return submitButton;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[name="name"]') {
+        return state.profileVisible ? [nameInput] : [];
+      }
+      if (selector === 'input[name="age"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      if (selector === 'input[inputmode="numeric"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      return [];
+    },
+  });
+  context.fillInput = () => {};
+  context.simulateClick = () => {
+    state.profileVisible = false;
+    context.location.href = 'https://platform.openai.com/auth/callback?code=abc&scope=openid&state=xyz';
+    context.document.body.innerText = '';
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'Logan',
+          lastName: 'Lee',
+          year: 1995,
+          month: 8,
+          day: 21,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
   assert.equal(context.__completions.length, 1);
   assert.equal(context.__completions[0].step, 5);
 });
