@@ -1010,6 +1010,76 @@ test('tmailor can open an already visible matching inbox row on the first attemp
   assert.equal(context.__state.clicked, 1);
 });
 
+test('tmailor step 7 opens an already visible Chinese OpenAI login mail instead of refreshing past it', async () => {
+  const context = createContext();
+  context.MailMatching = require('../shared/mail-matching.js');
+
+  const mailRow = {
+    tagName: 'TR',
+    textContent: 'noreply@tm.openai.com\n你的 OpenAI 代码为 ******\n刚刚',
+    getAttribute(name) {
+      if (name === 'data-id') return 'mail-row-openai-step7';
+      return null;
+    },
+    querySelector(selector) {
+      if (selector.includes('a[href*="emailid="]')) {
+        return null;
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 260, height: 48 };
+    },
+  };
+
+  let detailOpened = false;
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [{ textContent: 'Refresh', getBoundingClientRect() { return { width: 80, height: 24 }; } }];
+    }
+    if (selector === 'tr') {
+      return [mailRow];
+    }
+    return [];
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === 'h1') {
+      return detailOpened ? { textContent: '你的 OpenAI 代码为 223344' } : null;
+    }
+    if (selector === '#bodyCell') {
+      return detailOpened ? { textContent: '你的 OpenAI 代码为 223344。请输入此验证码以继续登录。' } : null;
+    }
+    return null;
+  };
+  context.simulateClick = (target) => {
+    context.__state.clicked += 1;
+    context.__state.lastClicked = target;
+    if (target === mailRow) {
+      detailOpened = true;
+      context.location.href = 'https://tmailor.com/inbox?emailid=mail-row-openai-step7';
+    }
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.handlePollEmail, 'expected tmailor test hooks to expose handlePollEmail');
+
+  const result = await hooks.handlePollEmail(7, {
+    subjectFilters: ['验证', 'code', 'login'],
+    senderFilters: ['openai', 'noreply'],
+    targetEmail: 'abc123@mikfarm.com',
+    maxAttempts: 1,
+    intervalMs: 0,
+    filterAfterTimestamp: 0,
+    excludeCodes: ['112233'],
+  });
+
+  assert.equal(result.code, '223344');
+  assert.equal(context.__state.clicked, 1);
+  assert.equal(context.location.href, 'https://tmailor.com/inbox?emailid=mail-row-openai-step7');
+});
+
 test('tmailor waits for Cloudflare confirm when the verification page appears', async () => {
   const context = createContext();
   context.document.body.innerText = 'Please verify that you are not a robot.';

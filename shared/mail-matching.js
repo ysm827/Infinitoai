@@ -17,12 +17,12 @@
       exclude: [],
     },
     7: {
-      include: [VERIFICATION_EN_SUBJECT],
-      exclude: [REGISTRATION_CN_SUBJECT],
+      include: [REGISTRATION_CN_SUBJECT, VERIFICATION_EN_SUBJECT],
+      exclude: [],
     },
     9: {
-      include: [VERIFICATION_EN_SUBJECT],
-      exclude: [REGISTRATION_CN_SUBJECT],
+      include: [REGISTRATION_CN_SUBJECT, VERIFICATION_EN_SUBJECT],
+      exclude: [],
     },
   };
 
