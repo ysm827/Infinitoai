@@ -288,7 +288,7 @@ test('step 7 reports the phone-verification blocker without auth-domain decorati
 
   assert.equal(
     response?.error,
-    'Step 7 blocked: phone number is required on the auth page. Please change node and retry.'
+    '第 7 步被拦截：当前 auth 页面要求手机号验证，请切换节点后重试。'
   );
   assert.deepEqual(context.__errors, [
     {
@@ -365,7 +365,7 @@ test('step 7 reports the phone-verification blocker when the verification submit
 
   assert.equal(
     response?.error,
-    'Step 7 blocked: phone number is required on the auth page. Please change node and retry.'
+    '第 7 步被拦截：当前 auth 页面要求手机号验证，请切换节点后重试。'
   );
   assert.deepEqual(context.__errors, [
     {
@@ -4484,7 +4484,11 @@ test('step 5 fills the welcome-create full name field when the page uses an Engl
       if (!state.profileVisible) {
         return [];
       }
-      if (selector === 'input[name="name"], input[name="age"], input[name="birthday"], [role="spinbutton"][data-type="year"], [role="spinbutton"][data-type="month"], [role="spinbutton"][data-type="day"]') {
+      if (
+        selector === 'input[name="name"]'
+        || selector === 'input[name="name"], input[name="full_name"], input[placeholder*="全名"], input[placeholder*="name" i], input[autocomplete="name"], input[id*="name" i]:not([type="hidden"])'
+        || selector === 'input[name="name"], input[name="age"], input[name="birthday"], [role="spinbutton"][data-type="year"], [role="spinbutton"][data-type="month"], [role="spinbutton"][data-type="day"]'
+      ) {
         return [nameInput, ageInput];
       }
       return [];
@@ -5575,6 +5579,238 @@ test('step 5 waits for a slower auth callback redirect before reporting success'
   assert.equal(response?.ok, true);
   assert.equal(context.__completions.length, 1);
   assert.equal(context.__completions[0].step, 5);
+});
+
+test('step 5 confirms the recovered post-profile url on a second check before skipping the profile form', async () => {
+  let fakeNow = 0;
+  const state = {
+    switchedToLanding: false,
+  };
+
+  const nameInput = {
+    getBoundingClientRect() {
+      return { width: 240, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/about-you',
+    bodyText: '全名',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="name"]')) {
+        return Promise.resolve(nameInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'button[type="submit"]') {
+        return null;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[name="name"]') {
+        return [nameInput];
+      }
+      return [];
+    },
+  });
+  context.Date = class extends Date {
+    static now() {
+      return fakeNow;
+    }
+  };
+  context.fillInput = () => {};
+  context.sleep = (ms = 0) => {
+    fakeNow += Math.max(1, Number(ms) || 0);
+    if (!state.switchedToLanding && fakeNow >= 1000) {
+      state.switchedToLanding = true;
+      context.location.href = 'https://platform.openai.com/welcome?step=create';
+      context.document.body.innerText = '';
+    }
+    return Promise.resolve();
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'James',
+          lastName: 'Rodriguez',
+          year: 1995,
+          month: 8,
+          day: 21,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.equal(context.__completions.length, 1);
+  assert.ok(fakeNow < 3000, `expected recovered landing detection to avoid the old 10s wait, got ${fakeNow}ms`);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.__completions[0])), {
+    step: 5,
+    payload: {
+      recoveredAfterNavigation: true,
+      skippedProfileForm: true,
+      reason: 'stable_post_profile_landing_without_birthday_input',
+    },
+  });
+});
+
+test('step 5 also skips quickly when the stable landing url appears before the name input shows up', async () => {
+  let fakeNow = 0;
+  let switchedToLanding = false;
+
+  const context = createContext({
+    href: 'https://auth.openai.com/about-you',
+    bodyText: '正在跳转',
+    waitForElementImpl() {
+      return Promise.reject(new Error('missing'));
+    },
+    querySelectorImpl() {
+      return null;
+    },
+    querySelectorAllImpl() {
+      return [];
+    },
+  });
+  context.Date = class extends Date {
+    static now() {
+      return fakeNow;
+    }
+  };
+  context.fillInput = () => {};
+  context.sleep = (ms = 0) => {
+    fakeNow += Math.max(1, Number(ms) || 0);
+    if (!switchedToLanding && fakeNow >= 1000) {
+      switchedToLanding = true;
+      context.location.href = 'https://platform.openai.com/welcome?step=create';
+      context.document.body.innerText = '';
+    }
+    return Promise.resolve();
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'John',
+          lastName: 'Martin',
+          year: 2002,
+          month: 2,
+          day: 5,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.ok(fakeNow < 3000, `expected stable landing to short-circuit the name-input wait, got ${fakeNow}ms`);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.__completions)), [
+    {
+      step: 5,
+      payload: {
+        recoveredAfterNavigation: true,
+        skippedProfileForm: true,
+        reason: 'stable_post_profile_landing_without_name_input',
+      },
+    },
+  ]);
+});
+
+test('step 5 does not skip the profile form when the recovered page still never reaches a stable success url', async () => {
+  let fakeNow = 0;
+
+  const nameInput = {
+    getBoundingClientRect() {
+      return { width: 240, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/about-you',
+    bodyText: '全名',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="name"]')) {
+        return Promise.resolve(nameInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'button[type="submit"]') {
+        return null;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[name="name"]') {
+        return [nameInput];
+      }
+      return [];
+    },
+  });
+  context.Date = class extends Date {
+    static now() {
+      return fakeNow;
+    }
+  };
+  context.fillInput = () => {};
+  context.sleep = (ms = 0) => {
+    fakeNow += Math.max(1, Number(ms) || 0);
+    return Promise.resolve();
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'James',
+          lastName: 'Rodriguez',
+          year: 1995,
+          month: 8,
+          day: 21,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.match(response?.error || '', /Could not find birthday or age input|submit button did not appear|stable next page/i);
+  assert.equal(context.__completions.length, 0);
 });
 
 test('step 5 does not report success when the submit button never appears and the page stays on about-you', async () => {
