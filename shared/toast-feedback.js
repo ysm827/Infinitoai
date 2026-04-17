@@ -20,6 +20,38 @@
     text = text.replace(/^Auto fetch failed:\s*/i, '');
     text = text.replace(/^Run \d+\/(?:\d+|∞) failed:\s*/i, '');
     text = text.replace(/^Step \d+ failed:\s*/i, '');
+    text = text.replace(/\s*\|\s*调试：[\s\S]*$/i, '');
+
+    if (/could not find verification code input/i.test(text)) {
+      return '未找到验证码输入框。';
+    }
+
+    if (
+      /phone verification|phone number is required on the auth page|add-phone|auth page requires phone verification before the verification email step/i.test(text)
+    ) {
+      return '当前 auth 页面要求手机号验证，请切换节点后重试。';
+    }
+
+    if (/email domain is unsupported on the auth page/i.test(text)) {
+      return '当前邮箱域名暂不受支持，已加入黑名单，请切换新邮箱后重试。';
+    }
+
+    if (/current auth page is not on the signup flow yet/i.test(text)) {
+      return '当前 auth 页面还没有进入注册流程。';
+    }
+
+    if (/signup auth page stayed unreachable before the verification email step/i.test(text)) {
+      return '注册验证页暂时无法访问，请稍后重试。';
+    }
+
+    if (/当前 auth 页面暂时无法访问，先等待验证页恢复响应后再查收邮件。/i.test(text)) {
+      return '当前 auth 页面暂时无法访问，先等待验证页恢复响应后再查收邮件。';
+    }
+
+    if (/当前邮箱域名暂不受支持，已加入黑名单，请切换新邮箱后重试。/i.test(text)) {
+      return '当前邮箱域名暂不受支持，已加入黑名单，请切换新邮箱后重试。';
+    }
+
     return text.trim();
   }
 
