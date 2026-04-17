@@ -34,7 +34,7 @@ async function step3_fillEmailPassword(payload) {
       if (recoveredSignupPasswordInput) {
         passwordInput = recoveredSignupPasswordInput;
       } else {
-        log('Step 3: Signup flow fell back to the existing-account login password page without a visible signup entry. Preserving the current email/password and continuing with the login flow instead of requesting a signup code.', 'warn');
+        log('第 3 步：注册流程回落到了已有账号的登录密码页，且页面没有可见注册入口，保留当前邮箱和密码，转入登录流程，不再请求注册验证码。', 'warn');
         reportComplete(3, { email, existingAccountLogin: true });
         return;
       }
@@ -87,7 +87,7 @@ async function step3_fillEmailPassword(payload) {
       if (recoveredSignupPasswordInput) {
         passwordInput = recoveredSignupPasswordInput;
       } else {
-        log('Step 3: Signup flow fell back to the existing-account login password page without a visible signup entry. Preserving the current email/password and continuing with the login flow instead of requesting a signup code.', 'warn');
+        log('第 3 步：注册流程回落到了已有账号的登录密码页，且页面没有可见注册入口，保留当前邮箱和密码，转入登录流程，不再请求注册验证码。', 'warn');
         reportComplete(3, { email, existingAccountLogin: true });
         return;
       }
@@ -145,7 +145,7 @@ async function step3_fillEmailPassword(payload) {
     if (recoveredSignupPasswordInput) {
       passwordInput = recoveredSignupPasswordInput;
     } else {
-      log('Step 3: Email submit landed on the existing-account login password page without a visible signup entry. Preserving the current email/password and continuing with the login flow instead of requesting a signup code.', 'warn');
+      log('第 3 步：提交邮箱后落到了已有账号的登录密码页，且页面没有可见注册入口，保留当前邮箱和密码，转入登录流程，不再请求注册验证码。', 'warn');
       reportComplete(3, { email, existingAccountLogin: true });
       return;
     }

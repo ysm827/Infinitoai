@@ -34,7 +34,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     resetStopState(message.controlSequence);
     fetchTmailorEmail(message.payload).then(sendResponse).catch((err) => {
       if (isStopError(err)) {
-        log('TMailor: Stopped by user.', 'warn');
+        log('TMailor：已由用户停止。', 'warn');
         sendResponse({ stopped: true, error: err.message });
         return;
       }
@@ -47,7 +47,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     resetStopState(message.controlSequence);
     handlePollEmail(message.step, message.payload).then(sendResponse).catch((err) => {
       if (isStopError(err)) {
-        log(`Step ${message.step}: Stopped by user.`, 'warn');
+        log(`第 ${message.step} 步：已由用户停止。`, 'warn');
         sendResponse({ stopped: true, error: err.message });
         return;
       }
@@ -448,7 +448,7 @@ function checkExpectedMailboxEmail(payload = {}) {
     return null;
   }
 
-  log(`TMailor: Current page mailbox ${pageEmail} does not match the panel email ${expectedEmail}. Requesting a background mailbox reopen before refreshing.`, 'warn');
+  log(`TMailor：当前页面邮箱 ${pageEmail} 与面板邮箱 ${expectedEmail} 不一致，刷新前先请求后台重开邮箱页。`, 'warn');
   return {
     recovery: 'reload_mailbox',
     reason: 'mailbox_email_mismatch',
@@ -943,7 +943,7 @@ async function handleMonetizationVideoAd(timeoutMs = 20000) {
   }
 
   if (clickedPlay || findMonetizationVideoDialog() || findMonetizationVideoCloseButton()) {
-    log('TMailor: Monetization video ad is still blocking the mailbox after the wait timeout', 'warn');
+    log('TMailor：等待超时后，变现视频广告仍在阻挡邮箱页面。', 'warn');
   }
   return false;
 }
@@ -992,7 +992,7 @@ function assertNoManualTakeoverBlockers() {
 async function dismissBlockingOverlay(timeoutMs = 4000) {
   const handledInterstitialAd = await handleDismissibleInterstitialAd(timeoutMs);
   if (handledInterstitialAd) {
-    log('TMailor: Blocking overlay closed successfully', 'ok');
+    log('TMailor：遮挡层已成功关闭。', 'ok');
     return true;
   }
 
@@ -1004,7 +1004,7 @@ async function dismissBlockingOverlay(timeoutMs = 4000) {
     const closeButton = findBlockingAdCloseButton();
     if (!closeButton) {
       if (sawCloseButton) {
-        log('TMailor: Blocking overlay closed successfully', 'ok');
+        log('TMailor：遮挡层已成功关闭。', 'ok');
       }
       return false;
     }
@@ -1015,13 +1015,13 @@ async function dismissBlockingOverlay(timeoutMs = 4000) {
     await sleep(600);
 
     if (!findBlockingAdCloseButton()) {
-      log('TMailor: Blocking overlay closed successfully', 'ok');
+      log('TMailor：遮挡层已成功关闭。', 'ok');
       return true;
     }
   }
 
   if (sawCloseButton) {
-    log('TMailor: Blocking overlay is still visible after retry timeout', 'warn');
+    log('TMailor：重试等待结束后，遮挡层仍然可见。', 'warn');
   }
   return false;
 }
@@ -1038,13 +1038,13 @@ async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = DEFAULT_CLOUD
     return false;
   }
 
-  log('TMailor: Cloudflare challenge is blocking the mailbox, attempting automatic verification first', 'warn');
+  log('TMailor：Cloudflare 验证正在阻挡邮箱，先尝试自动处理。', 'warn');
   const handled = await waitForCloudflareConfirm(timeoutMs, {
     observeBeforeCheckboxMs,
   });
   if (handled) {
     if (!isCloudflareChallengeVisible()) {
-      log('TMailor: Cloudflare challenge cleared automatically', 'ok');
+      log('TMailor：Cloudflare 验证已自动通过。', 'ok');
       return true;
     }
 
@@ -1055,7 +1055,7 @@ async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = DEFAULT_CLOUD
       throwIfStopped();
       const postConfirmElapsedMs = Math.max(0, Date.now() - graceStart);
       if (!isCloudflareChallengeVisible()) {
-        log('TMailor: Cloudflare challenge cleared during the post-confirm grace window', 'ok');
+        log('TMailor：Cloudflare 验证在 Confirm 后的缓冲期内已通过。', 'ok');
         return true;
       }
 
@@ -1097,7 +1097,7 @@ async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = DEFAULT_CLOUD
     }
 
     if (!isCloudflareChallengeVisible()) {
-      log('TMailor: Cloudflare challenge cleared during the post-confirm grace window', 'ok');
+      log('TMailor：Cloudflare 验证在 Confirm 后的缓冲期内已通过。', 'ok');
       return true;
     }
 
@@ -1112,9 +1112,9 @@ async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = DEFAULT_CLOUD
   }
 
   if (handled) {
-    log('TMailor: Cloudflare auto-attempt ran, but the challenge shell is still visible', 'warn');
+    log('TMailor：Cloudflare 自动尝试已执行，但挑战外壳仍然可见。', 'warn');
   } else {
-    log('TMailor: Cloudflare auto-attempt timed out before the challenge cleared', 'warn');
+    log('TMailor：Cloudflare 自动尝试超时，挑战仍未解除。', 'warn');
   }
 
   throw new Error('Cloudflare challenge detected on TMailor. Automatic verification did not complete, please take over manually.');
@@ -1405,7 +1405,7 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
       const confirmButton = findCloudflareConfirmButton();
       if (confirmButton && !isElementDisabled(confirmButton)) {
         visualSuccessFallbackUsed = true;
-        log('TMailor: Cloudflare widget reports a visual success state, but no token was observed after 5000ms. Trying Confirm as a fallback...', 'warn');
+        log('TMailor：Cloudflare 组件显示已成功，但 5000ms 内仍未观察到 token，改用 Confirm 作为兜底。', 'warn');
         logConfirmDecision('visual-success-fallback', {
           challengeTextVisible,
           challengeShellVisible,
@@ -1540,7 +1540,7 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
           if (String(checkboxTarget.tagName || '').toUpperCase() === 'IFRAME') {
             throw err;
           }
-          log(`TMailor: Debugger click failed on Cloudflare container, falling back to DOM click: ${err?.message || err}`, 'warn');
+          log(`TMailor：Debugger 点击 Cloudflare 容器失败，改用 DOM 点击兜底：${err?.message || err}`, 'warn');
           simulateClick(checkboxTarget);
         }
 
@@ -1580,7 +1580,7 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
       confirmButton,
       checkboxCandidate,
     }), 'warn');
-    log('TMailor: Cloudflare verification timed out before Confirm became clickable', 'warn');
+    log('TMailor：在 Confirm 可点击前，Cloudflare 验证已超时。', 'warn');
   }
   return false;
 }
@@ -1712,7 +1712,7 @@ async function fetchTmailorEmail(payload = {}) {
   } catch (err) {
     const message = String(err?.message || err);
     if (/Cloudflare challenge detected on TMailor/i.test(message)) {
-      log('TMailor: Initial mailbox challenge handling failed. Requesting a background mailbox reload before retrying...', 'warn');
+      log('TMailor：首次处理邮箱挑战失败，准备请求后台重开邮箱页后重试。', 'warn');
       return {
         recovery: 'reload_mailbox',
         error: message,
@@ -1757,7 +1757,7 @@ async function fetchTmailorEmail(payload = {}) {
     } catch (err) {
       const message = String(err?.message || err);
       if (/Cloudflare challenge detected on TMailor/i.test(message)) {
-        log('TMailor: Cloudflare auto-attempt failed during mailbox generation. Requesting a background mailbox reload before retrying...', 'warn');
+        log('TMailor：生成邮箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。', 'warn');
         return {
           recovery: 'reload_mailbox',
           error: message,
@@ -1783,7 +1783,7 @@ async function fetchTmailorEmail(payload = {}) {
     const domain = extractDomain(currentEmail);
 
     if (currentEmail && currentEmail !== previousEmail && isAllowedDomain(domainState, domain)) {
-      log(`TMailor: Ready mailbox ${currentEmail}`, 'ok');
+      log(`TMailor：临时邮箱已就绪 ${currentEmail}`, 'ok');
       return { ok: true, email: currentEmail, domain, generated: true };
     }
 

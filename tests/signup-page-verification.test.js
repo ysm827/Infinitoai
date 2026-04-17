@@ -499,7 +499,7 @@ test('step 2 still accepts the platform login email form when recovery prefers a
   ]);
 });
 
-test('step 2 completes immediately when the auth log-in page is already showing the email form', async () => {
+test('step 2 refuses the auth log-in email form and asks the background to reopen the platform login entry', async () => {
   const emailInput = {
     getBoundingClientRect() {
       return { width: 180, height: 42 };
@@ -531,14 +531,17 @@ test('step 2 completes immediately when the auth log-in page is already showing 
     setTimeout(() => reject(new Error('timeout waiting for response')), 2000);
   });
 
-  assert.equal(response?.ok, true);
-  assert.deepEqual(context.__errors, []);
-  assert.deepEqual(context.__completions, [
+  assert.equal(
+    response?.error,
+    'Step 2 recoverable: auth login page appeared instead of the platform login entry. Reopen https://platform.openai.com/login and retry.'
+  );
+  assert.deepEqual(context.__errors, [
     {
       step: 2,
-      payload: undefined,
+      message: response.error,
     },
   ]);
+  assert.deepEqual(context.__completions, []);
 });
 
 test('step 2 treats the dedicated #login-email field as a direct-entry login form', async () => {
@@ -583,7 +586,7 @@ test('step 2 treats the dedicated #login-email field as a direct-entry login for
   ]);
 });
 
-test('step 2 treats autocomplete=username inputs on auth log-in pages as a direct-entry login form', async () => {
+test('step 2 refuses autocomplete=username inputs on auth log-in pages and asks the background to reopen platform login', async () => {
   const emailInput = {
     getBoundingClientRect() {
       return { width: 200, height: 44 };
@@ -615,14 +618,17 @@ test('step 2 treats autocomplete=username inputs on auth log-in pages as a direc
     setTimeout(() => reject(new Error('timeout waiting for response')), 2000);
   });
 
-  assert.equal(response?.ok, true);
-  assert.deepEqual(context.__errors, []);
-  assert.deepEqual(context.__completions, [
+  assert.equal(
+    response?.error,
+    'Step 2 recoverable: auth login page appeared instead of the platform login entry. Reopen https://platform.openai.com/login and retry.'
+  );
+  assert.deepEqual(context.__errors, [
     {
       step: 2,
-      payload: undefined,
+      message: response.error,
     },
   ]);
+  assert.deepEqual(context.__completions, []);
 });
 
 test('step 2 waits for the completion signal before clicking a register link that navigates away', async () => {

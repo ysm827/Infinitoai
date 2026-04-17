@@ -69,13 +69,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: true, ...(result || {}) });
     }).catch(err => {
       if (isStopError(err)) {
-        log(`Step ${message.step || 8}: Stopped by user.`, 'warn');
+        log(`第 ${message.step || 8} 步：已由用户停止。`, 'warn');
         sendResponse({ stopped: true, error: err.message });
         return;
       }
 
       if (message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'STEP8_TRY_SUBMIT') {
-        log(`Step 8: ${err.message}`, 'error');
+        log(`第 8 步失败：${err.message}`, 'error');
         sendResponse({ error: err.message });
         return;
       }
@@ -133,6 +133,7 @@ async function step2_clickRegister(payload = {}) {
 
   await waitForPlatformEntryStateToSettle();
   await logoutFromPlatformChatSessionIfNeeded();
+  throwIfStep2UnexpectedAuthLoginEntry();
 
   if (isDirectSignupFormVisible({ preferSignupEntry })) {
     log('Step 2: Official signup form is already visible. Continuing without clicking Register.', 'info');
@@ -151,7 +152,7 @@ async function step2_clickRegister(payload = {}) {
       await humanPause(450, 1200);
       await reportStepCompleteBeforePotentialNavigation(2);
       simulateClick(loginEntryButton);
-      log('Step 2: create-account opened a session-ended landing page, clicked the primary continue/login button.', 'warn');
+      log('第 2 步：create-account 打开了会话结束页，已点击主继续/登录按钮。', 'warn');
       return;
     }
   }
@@ -298,14 +299,14 @@ async function waitForPlatformEntryStateToSettle(timeout = 8000) {
 
   if (isPlatformAuthCallbackPage() || isPlatformSigningInStateText(finalVisibleText)) {
     log(
-      'Step 2: Platform entry stayed on the stale signing-in bridge without surfacing the return-home recovery page. Leaving the page as-is so the background retry can reopen platform login cleanly.',
+      '第 2 步：Platform 入口仍停留在陈旧的 signing-in 跳转桥页面，且没有出现“返回首页”恢复页，先保持当前页面，交给后台重开 Platform 登录入口。',
       'warn'
     );
     return null;
   }
 
   if (sawPlatformRedirect) {
-    log('Step 2: Platform entry stayed on the redirect bridge longer than expected. Proceeding with the current page state...', 'warn');
+    log('第 2 步：Platform 入口停留在跳转桥页面的时间超出预期，先按当前页面状态继续。', 'warn');
   }
 
   return null;
@@ -329,7 +330,7 @@ async function recoverPlatformEntryFromAuthIssueIfNeeded(visibleText = getVisibl
   await humanPause(350, 900);
   simulateClick(returnHomeLink);
   await sleep(500);
-  log('Step 2: Platform entry hit the auth issue page. Clicked "返回首页" before reopening the platform login entry...', 'warn');
+  log('第 2 步：Platform 入口进入 auth 异常页，已先点击“返回首页”，随后重开 Platform 登录入口。', 'warn');
   location.href = PLATFORM_LOGIN_ENTRY_URL;
   await sleep(500);
   return true;
@@ -340,7 +341,7 @@ async function logoutFromPlatformChatSessionIfNeeded() {
     return false;
   }
 
-  log('Step 2: Platform login entry redirected into an active chat session. Logging out first...', 'warn');
+  log('第 2 步：Platform 登录入口误入已登录会话，先执行登出。', 'warn');
 
   const accountMenuButton = await ensurePlatformAccountMenuButtonVisible(10000);
 
@@ -357,13 +358,13 @@ async function logoutFromPlatformChatSessionIfNeeded() {
   await clickPlatformLogoutAction(logoutLabel);
   await waitForPlatformLogoutRedirect();
   await ensurePlatformLoginEntryAfterLogout();
-  log('Step 2: Logged out of the existing platform chat session and returned to the login page.', 'warn');
+  log('第 2 步：已登出当前 Platform 会话，并返回登录页。', 'warn');
   return true;
 }
 
 async function ensurePlatformLoginEntryAfterLogout(timeout = 15000) {
   if (!isPlatformLoginEntryPage()) {
-    log('Step 2: Logout landed outside the platform login entry. Reopening https://platform.openai.com/login before continuing...', 'warn');
+    log('第 2 步：登出后没有回到 Platform 登录入口，先重开 https://platform.openai.com/login 再继续。', 'warn');
     location.href = PLATFORM_LOGIN_ENTRY_URL;
   }
 
@@ -545,7 +546,7 @@ async function openPlatformResponsiveShellMenu(button) {
     return accountButton;
   }
 
-  log('Step 2: Platform shell menu did not reveal the avatar after the first click. Retrying with a low-level pointer sequence...', 'warn');
+  log('第 2 步：首次点击 Platform 外层菜单后仍未出现头像入口，改用底层指针点击重试。', 'warn');
   dispatchPointerClickSequence(button);
   accountButton = await waitForPlatformAccountMenuButton(1800);
   return accountButton;
@@ -588,7 +589,7 @@ async function openPlatformAccountMenu(button) {
     return logoutLabel;
   }
 
-  log('Step 2: Platform account menu did not open after the first avatar click. Retrying with a low-level pointer sequence...', 'warn');
+  log('第 2 步：头像菜单首次点击未展开，改用底层指针点击重试。', 'warn');
   dispatchPointerClickSequence(button);
   logoutLabel = await waitForPlatformAccountMenuOpen(button, 1800);
   return logoutLabel;
@@ -612,7 +613,7 @@ async function clickPlatformLogoutAction(logoutLabel) {
     return true;
   }
 
-  log('Step 2: Logout menu item did not navigate away after the first click. Retrying with a low-level pointer sequence...', 'warn');
+  log('第 2 步：登出菜单首次点击后没有跳走，改用底层指针点击重试。', 'warn');
   dispatchPointerClickSequence(target);
   await sleep(250);
   return !isPlatformChatSessionPage();
@@ -668,6 +669,18 @@ function isCreateAccountSessionEndedPage(text = getVisiblePageText()) {
   }
 
   return /你的会话已结束|session has ended|session ended|登录以继续|log in to continue|chatgpt\.com/i.test(text);
+}
+
+function isAuthLoginEntryPage(url = location.href) {
+  return /(?:auth|accounts)\.openai\.com\/log-?in(?:[/?#]|$)/i.test(String(url || ''));
+}
+
+function throwIfStep2UnexpectedAuthLoginEntry() {
+  if (isAuthLoginEntryPage(location.href) && hasVisibleCredentialInput()) {
+    throw new Error(
+      'Step 2 recoverable: auth login page appeared instead of the platform login entry. Reopen https://platform.openai.com/login and retry.'
+    );
+  }
 }
 
 function isSignupContextUrl(url = location.href) {
@@ -766,7 +779,7 @@ async function recoverStep3SignupPasswordInputFromLoginPasswordPage() {
 
   await humanPause(450, 1200);
   simulateClick(registerChoice);
-  log('Step 3: Login password page still offers signup, clicked Register to return to the signup password form.', 'warn');
+  log('第 3 步：当前仍是登录密码页，但页面还提供注册入口，已点击 Register 返回注册密码表单。', 'warn');
   await sleep(1200);
 
   const passwordInput = findVisiblePasswordInput()
@@ -1496,7 +1509,7 @@ async function submitStep3WithPassword(payload, passwordInput) {
   }
 
   if (submitStep3PasswordWithFallback(passwordInput)) {
-    log('Step 3: Submit button did not appear after password entry. Submitted the form via a fallback Enter key sequence.', 'warn');
+    log('第 3 步：填写密码后没有出现提交按钮，已改用回车兜底提交表单。', 'warn');
     return submissionStartUrl;
   }
 
@@ -1637,7 +1650,7 @@ async function waitForLoginPasswordField(timeout = 25000) {
     await sleep(250);
   }
 
-  log(`Step 6: Password field did not appear within ${Math.round(timeout / 1000)}s.`, 'warn');
+  log(`第 6 步：在 ${Math.round(timeout / 1000)} 秒内没有等到密码输入框出现。`, 'warn');
   return null;
 }
 
@@ -1934,7 +1947,7 @@ async function step5_fillNameBirthday(payload) {
       10000
     );
   } catch {
-    log('Step 5: Name input did not appear after verification. Treating the profile form as skipped and continuing to login...', 'warn');
+    log('第 5 步：验证完成后一直没有出现姓名输入框，视为可跳过资料填写并继续登录流程。', 'warn');
     reportComplete(5, {
       skippedProfileForm: true,
       reason: 'missing_name_input',
@@ -1963,7 +1976,7 @@ async function step5_fillNameBirthday(payload) {
   }
 
   if (!birthdayMode && !ageInput && isStablePostProfileLandingUrl()) {
-    log('Step 5: Landed on a stable post-profile page without birthday or age inputs after navigation replay. Treating the profile step as already completed.', 'warn');
+    log('第 5 步：导航恢复后已进入稳定的资料后页面，且没有生日或年龄输入框，视为资料步骤已经完成。', 'warn');
     reportComplete(5, {
       recoveredAfterNavigation: true,
       skippedProfileForm: true,

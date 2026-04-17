@@ -3241,7 +3241,7 @@ test('tmailor closes blocking ads before continuing mailbox actions', async () =
     'expected the overlay click log to include the close-button details'
   );
   assert.ok(
-    context.__state.logs.some((entry) => /Blocking overlay closed successfully/i.test(entry.message)),
+    context.__state.logs.some((entry) => /遮挡层已成功关闭/i.test(entry.message)),
     'expected an overlay success log'
   );
 });
@@ -3768,11 +3768,11 @@ test('tmailor waitForMailboxControls auto-attempts Cloudflare before allowing ma
   await assert.doesNotReject(() => hooks.waitForMailboxControls(7000));
   assert.equal(state.runtimeMessages?.[0]?.type, 'DEBUGGER_CLICK_AT');
   assert.ok(
-    state.logs.some((entry) => /attempting automatic verification first/i.test(entry.message)),
+    state.logs.some((entry) => /Cloudflare 验证正在阻挡邮箱，先尝试自动处理/i.test(entry.message)),
     'expected an auto-attempt log before manual takeover'
   );
   assert.ok(
-    state.logs.some((entry) => /challenge cleared automatically/i.test(entry.message)),
+    state.logs.some((entry) => /Cloudflare 验证已自动通过/i.test(entry.message)),
     'expected an automatic-clear success log'
   );
 });
@@ -3839,7 +3839,7 @@ test('tmailor stops and asks for manual takeover when a Cloudflare challenge is 
     /Cloudflare challenge detected on TMailor\. Automatic verification did not complete, please take over manually\./i
   );
   assert.ok(
-    context.__state.logs.some((entry) => /attempting automatic verification first/i.test(entry.message)),
+    context.__state.logs.some((entry) => /Cloudflare 验证正在阻挡邮箱，先尝试自动处理/i.test(entry.message)),
     'expected an auto-attempt log before manual takeover'
   );
 });
@@ -4158,7 +4158,7 @@ test('tmailor allows extra post-confirm grace time when the Cloudflare shell cle
 
   assert.equal(cleared, true);
   assert.ok(
-    context.__state.logs.some((entry) => /Cloudflare challenge cleared during the post-confirm grace window/i.test(entry.message)),
+    context.__state.logs.some((entry) => /Cloudflare 验证在 Confirm 后的缓冲期内已通过/i.test(entry.message)),
     'expected a post-confirm grace success log'
   );
 });
@@ -4971,7 +4971,7 @@ test('tmailor asks background to reload the mailbox instead of self-refreshing d
   assert.match(String(result?.error || ''), /Cloudflare challenge detected on TMailor/i);
   assert.equal((state.locationChanges || []).length, 0);
   assert.ok(
-    state.logs.some((entry) => /Requesting a background mailbox reload before retrying/i.test(entry.message)),
+    state.logs.some((entry) => /首次处理邮箱挑战失败，准备请求后台重开邮箱页后重试/i.test(entry.message)),
     'expected a background-reload handoff log'
   );
 });
@@ -5043,7 +5043,7 @@ test('tmailor asks background to reopen the mailbox when inbox refresh sees a di
   assert.equal(result?.reason, 'mailbox_email_mismatch');
   assert.equal(state.clicked, 0);
   assert.ok(
-    state.logs.some((entry) => /page mailbox .* does not match the panel email/i.test(entry.message)),
+    state.logs.some((entry) => /当前页面邮箱 .* 与面板邮箱 .* 不一致，刷新前先请求后台重开邮箱页/i.test(entry.message)),
     'expected a mismatch handoff log'
   );
 });
